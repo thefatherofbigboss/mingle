@@ -1,11 +1,16 @@
 import { Resend } from 'resend';
 import { Booking, Event } from './events';
 
-if (!process.env.RESEND_API_KEY) {
-    throw new Error('RESEND_API_KEY is not defined');
+let resendInstance: Resend | null = null;
+export function getResend() {
+    if (!resendInstance) {
+        if (!process.env.RESEND_API_KEY) {
+            throw new Error('RESEND_API_KEY is not defined');
+        }
+        resendInstance = new Resend(process.env.RESEND_API_KEY);
+    }
+    return resendInstance;
 }
-
-export const resend = new Resend(process.env.RESEND_API_KEY);
 
 export async function sendEmail({
     to,
@@ -23,6 +28,7 @@ export async function sendEmail({
     attachments?: { filename: string; content: Buffer | Uint8Array }[];
 }) {
     try {
+        const resend = getResend();
         const data = await resend.emails.send({
             from,
             to,

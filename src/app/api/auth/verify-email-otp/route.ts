@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import crypto from 'crypto';
 
+export const dynamic = 'force-dynamic';
+
 const OTP_SECRET = process.env.INTERNAL_API_SECRET || 'fallback_secret_xyz'; // Defined in .env.local
 
 export async function POST(req: NextRequest) {

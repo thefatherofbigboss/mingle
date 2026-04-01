@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { Resend } from 'resend';
+import { getResend } from '@/lib/email';
 import crypto from 'crypto';
 
-const resend = new Resend(process.env.RESEND_API_KEY!);
+export const dynamic = 'force-dynamic';
+
 const OTP_SECRET = process.env.INTERNAL_API_SECRET || 'fallback_secret_xyz'; // Defined in .env.local
 
 export async function POST(req: NextRequest) {
@@ -29,7 +30,7 @@ export async function POST(req: NextRequest) {
             .digest('hex');
 
         // Send Email
-        const { error: emailError } = await resend.emails.send({
+        const { error: emailError } = await getResend().emails.send({
             from: 'Stranger Mingle <team@strangermingle.com>',
             to: [email],
             subject: 'Your stranger mingle verification code',
