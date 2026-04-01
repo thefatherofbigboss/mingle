@@ -35,13 +35,6 @@ function initializeFirebaseAdmin() {
         console.log('[Firebase Admin] Loading service account from:', fullPath);
         const fileContent = fs.readFileSync(fullPath, 'utf8');
         serviceAccount = JSON.parse(fileContent);
-      } else {
-        // Monorepo fallback
-        const fallbackPath = path.resolve(process.cwd(), 'apps/backend', serviceAccountPath.replace('./', ''));
-        if (fs.existsSync(fallbackPath)) {
-            console.log('[Firebase Admin] Loading from fallback:', fallbackPath);
-            serviceAccount = JSON.parse(fs.readFileSync(fallbackPath, 'utf8'));
-        }
       }
     }
 
