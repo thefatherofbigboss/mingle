@@ -67,13 +67,28 @@ export async function POST(request: NextRequest) {
                 const razorpaySubscriptionId = subscription.entity.id;
                 const supabase = createAdminClient();
 
-                await supabase
-                    .from('subscriptions')
-                    .update({
-                        status: 'active',
-                        updated_at: new Date().toISOString()
-                    })
-                    .eq('razorpay_subscription_id', razorpaySubscriptionId);
+                const currentStart = subscription.entity.current_start ? new Date(subscription.entity.current_start * 1000).toISOString() : null;
+                const currentEnd = subscription.entity.current_end ? new Date(subscription.entity.current_end * 1000).toISOString() : null;
+
+                // Update both old and new tables for backward compatibility until fully migrated
+                await Promise.all([
+                    supabase
+                        .from('subscriptions')
+                        .update({
+                            status: 'active',
+                            updated_at: new Date().toISOString()
+                        })
+                        .eq('razorpay_subscription_id', razorpaySubscriptionId),
+                    supabase
+                        .from('user_subscriptions')
+                        .update({
+                            status: 'active',
+                            current_period_start: currentStart,
+                            current_period_end: currentEnd,
+                            updated_at: new Date().toISOString()
+                        })
+                        .eq('razorpay_subscription_id', razorpaySubscriptionId)
+                ]);
             }
         }
 

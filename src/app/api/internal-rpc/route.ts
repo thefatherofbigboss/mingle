@@ -92,7 +92,7 @@ export async function POST(req: Request) {
     const authenticatedFunctions = [
         'toggleEventLike', 'toggleEventSave', 'setEventInterest', 
         'submitEventReview', 'checkUserInteraction', 'createOrUpdateUserProfile',
-        'getUserProfileByUserId'
+        'getUserProfileByUserId', 'getUserSubscription'
     ];
 
     if (authenticatedFunctions.includes(functionName)) {
@@ -102,14 +102,12 @@ export async function POST(req: Request) {
         }
         
         // Find the index of the userId argument. 
-        // Most interaction functions have (eventId, userId, ...)
-        // We'll trust the function signatures in our lib.
         if (functionName === 'submitEventReview') {
             // reviewData is usually args[0]
             if (processedArgs[0] && typeof processedArgs[0] === 'object') {
                 processedArgs[0].user_id = mappedUserId;
             }
-        } else if (functionName === 'getUserProfileByUserId') {
+        } else if (functionName === 'getUserProfileByUserId' || functionName === 'getUserSubscription') {
             processedArgs[0] = mappedUserId;
         } else if (functionName === 'createOrUpdateUserProfile') {
             if (processedArgs[0] && typeof processedArgs[0] === 'object') {

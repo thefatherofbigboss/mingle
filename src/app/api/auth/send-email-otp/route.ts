@@ -29,6 +29,11 @@ export async function POST(req: NextRequest) {
             .update(payload)
             .digest('hex');
 
+        // [DEV LOG] Log OTP to terminal for manual verification if email delivery fails
+        console.log(`\n-----------------------------------------`);
+        console.log(`[AUTH] OTP for ${email}: ${otp}`);
+        console.log(`-----------------------------------------\n`);
+
         // Send Email
         const { error: emailError } = await getResend().emails.send({
             from: 'Stranger Mingle <team@strangermingle.com>',

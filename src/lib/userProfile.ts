@@ -46,8 +46,8 @@ export async function syncFirebaseUser(firebaseUser: {
     }
 
     if (existingUser) {
-        // Option: Update record if needed (e.g. email changed). 
-        // For now, keep it simple and just return.
+        // Link any pending subscriptions to this user
+        await linkSubscriptionToUser(mappedUserId, email || '', phoneNumber || '');
         return existingUser;
     }
 
@@ -70,6 +70,9 @@ export async function syncFirebaseUser(firebaseUser: {
         console.error('[UserService] Error creating user record:', insertError);
         return null;
     }
+
+    // Link any pending subscriptions to this new user record
+    await linkSubscriptionToUser(mappedUserId, email || '', phoneNumber || '');
 
     return newUser;
 }
@@ -121,11 +124,53 @@ export async function updateUserProfile(userId: string, data: {
     return updatedUser;
 }
 
+
 /**
- * Backward Compatibility Aliases
+ * Link any orphaned subscriptions to a user record based on email or phone
  */
-export async function getUserProfileByPhone(phone: string) {
+export async function linkSubscriptionToUser(userId: string, email: string, phone: string) {
     const supabase = createAdminClient();
-    const { data } = await supabase.from('users').select('*').eq('phone', phone).maybeSingle();
+    
+    if (!email && !phone) return;
+
+    console.log(`[UserService] Attempting to link subscriptions for user ${userId} (Email: ${email}, Phone: ${phone})`);
+    
+    // Build the query conditions
+    const conditions = [];
+    if (email) conditions.push(`customer_email.eq.${email}`);
+    if (phone) conditions.push(`customer_phone.eq.${phone}`);
+    
+    if (conditions.length === 0) return;
+
+    const { error } = await supabase
+        .from('user_subscriptions')
+        .update({ 
+            user_id: userId,
+            updated_at: new Date().toISOString()
+        })
+        .or(conditions.join(','))
+        .is('user_id', null);
+
+    if (error) {
+        console.error('[UserService] Error linking subscription:', error);
+    }
+}
+
+/**
+ * Fetch a user's subscription details
+ */
+export async function getUserSubscription(userId: string) {
+    const supabase = createAdminClient();
+    const { data, error } = await supabase
+        .from('user_subscriptions')
+        .select('*')
+        .eq('user_id', userId)
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+    if (error) {
+        console.error('[UserService] Error fetching user subscription:', error);
+    }
     return data;
 }
