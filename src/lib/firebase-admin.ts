@@ -10,34 +10,27 @@ if (!serviceAccountPath) {
 }
 
 function initializeFirebaseAdmin() {
-  const existingApps = getApps();
-  if (existingApps.length > 0) {
-    const existingApp = admin.app();
-    // Check if the existing app has a project ID (it should have one if correctly initialized with cert)
-    // In some cases, a default empty app might be present.
-    if ((existingApp.options as any).projectId || (existingApp.options.credential as any)?.projectId) {
-      return existingApp;
-    }
-    console.warn('[Firebase Admin] Found existing app but it appears uncredentialed. Re-initializing...');
+  // Check if Firebase Admin is already initialized
+  if (admin.apps.length > 0) {
+    return admin.apps[0]!;
   }
 
-  console.log('[Firebase Admin] Starting initialization...');
-  
   try {
     let serviceAccount: any = null;
     
+    // Priority 1: Service Account JSON File
     if (serviceAccountPath) {
       const fullPath = path.isAbsolute(serviceAccountPath) 
         ? serviceAccountPath 
         : path.resolve(process.cwd(), serviceAccountPath);
       
       if (fs.existsSync(fullPath)) {
-        console.log('[Firebase Admin] Loading service account from:', fullPath);
         const fileContent = fs.readFileSync(fullPath, 'utf8');
         serviceAccount = JSON.parse(fileContent);
       }
     }
 
+    // Priority 2: Service Account JSON String Env
     if (!serviceAccount && process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
         try {
             serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON);
@@ -46,24 +39,32 @@ function initializeFirebaseAdmin() {
         }
     }
 
-    if (serviceAccount) {
-      // STRICT VALIDATION
-      if (!serviceAccount.project_id || !serviceAccount.private_key || !serviceAccount.client_email) {
-          throw new Error('Service account object is missing required fields (project_id, private_key, client_email)');
-      }
+    // Priority 3: Individual Env Vars (Professional/Cloud Standard approach)
+    if (!serviceAccount && process.env.FIREBASE_PRIVATE_KEY && process.env.FIREBASE_CLIENT_EMAIL) {
+        serviceAccount = {
+            project_id: process.env.FIREBASE_PROJECT_ID || process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID,
+            client_email: process.env.FIREBASE_CLIENT_EMAIL,
+            private_key: process.env.FIREBASE_PRIVATE_KEY
+        };
+    }
 
+    if (serviceAccount) {
       // Ensure private key has correct newline characters if they were escaped
       if (typeof serviceAccount.private_key === 'string' && serviceAccount.private_key.includes('\\n')) {
           serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
       }
 
+      console.log(`[Firebase Admin] Initializing for project: ${serviceAccount.project_id}`);
       return admin.initializeApp({
         credential: admin.credential.cert(serviceAccount),
         projectId: serviceAccount.project_id
       });
     } else {
-        console.warn('[Firebase Admin] No service account found. Falling back to default credentials.');
-        return admin.initializeApp();
+        const projectId = process.env.FIREBASE_PROJECT_ID || process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID;
+        console.warn(`[Firebase Admin] CRITICAL: No full credentials found. Authentication will likely fail.`);
+        return admin.initializeApp({
+            projectId: projectId
+        });
     }
   } catch (error: any) {
     console.error('[Firebase Admin] Initialization Failed:', error.message);

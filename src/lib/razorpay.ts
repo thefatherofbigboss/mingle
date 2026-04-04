@@ -52,6 +52,22 @@ export function verifyRazorpaySignature(
     return expectedSignature === signature;
 }
 
+export function verifyRazorpaySubscriptionSignature(
+    subscriptionId: string,
+    paymentId: string,
+    signature: string
+): boolean {
+    const secret = process.env.RAZORPAY_KEY_SECRET!;
+    const body = paymentId + '|' + subscriptionId;
+    
+    const expectedSignature = crypto
+        .createHmac('sha256', secret)
+        .update(body.toString())
+        .digest('hex');
+    
+    return expectedSignature === signature;
+}
+
 export function verifyWebhookSignature(
     payload: string,
     signature: string,
@@ -63,4 +79,13 @@ export function verifyWebhookSignature(
         .digest('hex');
     
     return expectedSignature === signature;
+}
+export async function getRazorpaySubscription(subscriptionId: string) {
+    try {
+        const subscription = await razorpay.subscriptions.fetch(subscriptionId);
+        return subscription;
+    } catch (error) {
+        console.error('Error fetching Razorpay subscription:', error);
+        throw error;
+    }
 }

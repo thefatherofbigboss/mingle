@@ -1019,18 +1019,37 @@ export interface VenuePartner {
     longitude: number | null;
     google_maps_url: string | null;
     event_count: number;
+    // New fields from venue_partners table
+    description?: string | null;
+    cover_image_url?: string | null;
+    website_url?: string | null;
+    rating_avg?: number;
+    rating_count?: number;
+    amenities?: string[] | null;
+    is_active?: boolean;
 }
 
 /**
- * Get all unique venue partners from locations table
+ * Get all matching venue partners with optional filters
  */
 export async function getAllVenuePartners(): Promise<VenuePartner[]> {
     const supabase = sharedClient;
 
-    // 1. Fetch all locations that have coordinates
+    // 1. Fetch all locations that have coordinates, left joining with venue_partners
     const { data: locations, error: locError } = await supabase
         .from('locations')
-        .select('*')
+        .select(`
+            *,
+            venue_partners!location_id(
+                description,
+                cover_image_url,
+                website_url,
+                rating_avg,
+                rating_count,
+                amenities,
+                is_active
+            )
+        `)
         .not('latitude', 'is', null)
         .not('longitude', 'is', null);
 
@@ -1056,13 +1075,171 @@ export async function getAllVenuePartners(): Promise<VenuePartner[]> {
     }
 
     // 3. Map to VenuePartner interface
-    return locations.map(loc => ({
-        venue_name: loc.venue_name || 'Unnamed Venue',
-        city: loc.city || 'India',
-        address: loc.address_line1 || '',
-        latitude: loc.latitude ? Number(loc.latitude) : null,
-        longitude: loc.longitude ? Number(loc.longitude) : null,
-        google_maps_url: loc.google_maps_url,
-        event_count: eventCountMap.get(loc.id) || 0
-    })).sort((a, b) => b.event_count - a.event_count);
+    return locations.map(loc => {
+        const partner = (loc.venue_partners as any)?.[0] || {};
+        return {
+            venue_name: loc.venue_name || 'Unnamed Venue',
+            city: loc.city || 'India',
+            address: loc.address_line1 || '',
+            latitude: loc.latitude ? Number(loc.latitude) : null,
+            longitude: loc.longitude ? Number(loc.longitude) : null,
+            google_maps_url: loc.google_maps_url,
+            event_count: eventCountMap.get(loc.id) || 0,
+            description: partner.description || null,
+            cover_image_url: partner.cover_image_url || null,
+            website_url: partner.website_url || null,
+            rating_avg: Number(partner.rating_avg) || 0,
+            rating_count: Number(partner.rating_count) || 0,
+            amenities: partner.amenities || [],
+            is_active: partner.is_active !== false // Default to true
+        } as VenuePartner;
+    }).sort((a, b) => b.event_count - a.event_count);
+}
+
+/**
+ * Get venue partners for a specific city
+ */
+export async function getVenuePartnersByCity(city: string): Promise<VenuePartner[]> {
+    const supabase = sharedClient;
+
+    // 1. Fetch locations in this city
+    const { data: locations, error: locError } = await supabase
+        .from('locations')
+        .select(`
+            *,
+            venue_partners!location_id(
+                description,
+                cover_image_url,
+                website_url,
+                rating_avg,
+                rating_count,
+                amenities,
+                is_active
+            )
+        `)
+        .ilike('city', `%${city}%`);
+
+    if (locError) {
+        console.error(`Error fetching locations for city ${city}:`, locError);
+        return [];
+    }
+
+    // 2. Fetch event counts for this city
+    const { data: events } = await supabase
+        .from('v_events_public')
+        .select('location_id')
+        .eq('status', 'published')
+        .ilike('city', `%${city}%`);
+
+    const eventCountMap = new Map<string, number>();
+    if (events) {
+        events.forEach(e => {
+            if (e.location_id) {
+                eventCountMap.set(e.location_id, (eventCountMap.get(e.location_id) || 0) + 1);
+            }
+        });
+    }
+
+    // 3. Map output
+    return locations.map(loc => {
+        const partner = (loc.venue_partners as any)?.[0] || {};
+        return {
+            venue_name: loc.venue_name || 'Unnamed Venue',
+            city: loc.city || 'India',
+            address: loc.address_line1 || '',
+            latitude: loc.latitude ? Number(loc.latitude) : null,
+            longitude: loc.longitude ? Number(loc.longitude) : null,
+            google_maps_url: loc.google_maps_url,
+            event_count: eventCountMap.get(loc.id) || 0,
+            description: partner.description || null,
+            cover_image_url: partner.cover_image_url || null,
+            website_url: partner.website_url || null,
+            rating_avg: Number(partner.rating_avg) || 0,
+            rating_count: Number(partner.rating_count) || 0,
+            amenities: partner.amenities || [],
+            is_active: partner.is_active !== false
+        } as VenuePartner;
+    }).sort((a, b) => b.event_count - a.event_count);
+}
+
+/**
+ * Get venue partners with upcoming events
+ */
+export async function getUpcomingVenuePartners(): Promise<VenuePartner[]> {
+    const supabase = sharedClient;
+    const now = new Date().toISOString();
+
+    // 1. Get location_ids with upcoming events
+    const { data: upcomingEvents, error: eventError } = await supabase
+        .from('v_events_public')
+        .select('location_id')
+        .eq('status', 'published')
+        .gte('end_datetime', now);
+
+    if (eventError || !upcomingEvents) {
+        console.error('Error fetching upcoming events:', eventError);
+        return [];
+    }
+
+    const locationIds = Array.from(new Set(upcomingEvents.map(e => e.location_id).filter(Boolean)));
+
+    if (locationIds.length === 0) return [];
+
+    // 2. Fetch these locations with partner metadata
+    const { data: locations, error: locError } = await supabase
+        .from('locations')
+        .select(`
+            *,
+            venue_partners!location_id(
+                description,
+                cover_image_url,
+                website_url,
+                rating_avg,
+                rating_count,
+                amenities,
+                is_active
+            )
+        `)
+        .in('id', locationIds);
+
+    if (locError) {
+        console.error('Error fetching locations with upcoming events:', locError);
+        return [];
+    }
+
+    // 3. Map event counts (overall published)
+    const { data: allEvents } = await supabase
+        .from('v_events_public')
+        .select('location_id')
+        .eq('status', 'published')
+        .in('location_id', locationIds);
+
+    const eventCountMap = new Map<string, number>();
+    if (allEvents) {
+        allEvents.forEach(e => {
+            if (e.location_id) {
+                eventCountMap.set(e.location_id, (eventCountMap.get(e.location_id) || 0) + 1);
+            }
+        });
+    }
+
+    return locations.map(loc => {
+        const partner = (loc.venue_partners as any)?.[0] || {};
+        return {
+            venue_name: loc.venue_name || 'Unnamed Venue',
+            city: loc.city || 'India',
+            address: loc.address_line1 || '',
+            latitude: loc.latitude ? Number(loc.latitude) : null,
+            longitude: loc.longitude ? Number(loc.longitude) : null,
+            google_maps_url: loc.google_maps_url,
+            event_count: eventCountMap.get(loc.id) || 0,
+            description: partner.description || null,
+            cover_image_url: partner.cover_image_url || null,
+            website_url: partner.website_url || null,
+            rating_avg: Number(partner.rating_avg) || 0,
+            rating_count: Number(partner.rating_count) || 0,
+            amenities: partner.amenities || [],
+            is_active: partner.is_active !== false
+        } as VenuePartner;
+    }).sort((a, b) => b.event_count - a.event_count);
 }

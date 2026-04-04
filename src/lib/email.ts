@@ -476,3 +476,75 @@ export function generateBookingConfirmationHtml(booking: Booking & {
 </html>
     `;
 }
+
+export function generateMembershipVerificationHtml(name: string, verificationLink: string) {
+    return `
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <style>
+            body { font-family: 'DM Sans', sans-serif; background-color: #f4f4f4; margin: 0; padding: 40px 20px; }
+            .card { max-width: 500px; margin: auto; background: white; border-radius: 24px; padding: 40px; box-shadow: 0 10px 30px rgba(0,0,0,0.05); text-align: center; }
+            .logo { width: 80px; margin-bottom: 24px; }
+            h1 { font-size: 28px; font-weight: 800; color: #111; margin-bottom: 16px; }
+            p { color: #666; line-height: 1.6; margin-bottom: 32px; }
+            .button { display: inline-block; background: #eab308; color: black; padding: 16px 32px; border-radius: 14px; text-decoration: none; font-weight: bold; box-shadow: 0 4px 14px rgba(234, 179, 8, 0.3); }
+            .footer { margin-top: 32px; font-size: 12px; color: #aaa; }
+        </style>
+    </head>
+    <body>
+        <div class="card">
+            <img src="https://strangermingle.com/logo.png" alt="Stranger Mingle" class="logo">
+            <h1>Verify Your Membership</h1>
+            <p>Hey ${name},<br><br>Welcome to <b>Stranger Mingle Premium</b>! You're almost there. Please click the button below to verify your official email and activate your full membership benefits.</p>
+            <a href="${verificationLink}" class="button">Verify My Email</a>
+            <p style="margin-top: 32px; font-size: 12px;">If the button doesn't work, copy and paste this link:<br>${verificationLink}</p>
+            <div class="footer">
+                &copy; 2026 Stranger Mingle. A premium community for verified strangers.
+            </div>
+        </div>
+    </body>
+    </html>
+    `;
+}
+
+export function generatePasswordResetHtml(resetLink: string) {
+    const year = new Date().getFullYear();
+    return `
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@400;500;600;700&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+        <style>
+            body { font-family: 'DM Sans', sans-serif; background-color: #efefef; margin: 0; padding: 40px 20px; }
+            .container { max-width: 500px; margin: auto; }
+            .card { background: white; border-radius: 28px; padding: 48px; box-shadow: 0 12px 40px rgba(0,0,0,0.09); text-align: center; position: relative; overflow: hidden; }
+            .card::before { content: ''; position: absolute; inset: 0; background: radial-gradient(ellipse 80% 60% at 50% -10%, #fff8e1 0%, transparent 70%); pointer-events: none; }
+            .logo { width: 100px; margin-bottom: 32px; position: relative; z-index: 1; }
+            h1 { font-family: 'Cormorant Garamond', serif; font-size: 36px; font-weight: 700; color: #111; margin: 0 0 16px 0; position: relative; z-index: 1; }
+            p { color: #666; line-height: 1.6; margin-bottom: 32px; font-size: 15px; position: relative; z-index: 1; }
+            .button { display: inline-block; background: #eab308; color: black; padding: 18px 40px; border-radius: 16px; text-decoration: none; font-weight: 800; font-size: 14px; text-transform: uppercase; letter-spacing: 0.05em; box-shadow: 0 8px 24px rgba(234, 179, 8, 0.25); transition: transform 0.2s; position: relative; z-index: 1; }
+            .footer { margin-top: 32px; font-size: 12px; color: #aaa; text-align: center; }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="card">
+                <img src="https://strangermingle.com/logo.png" alt="Stranger Mingle" class="logo">
+                <h1>Reset Your Password</h1>
+                <p>We received a request to reset the password for your <b>Stranger Mingle</b> membership account. Click the button below to choose a new password.</p>
+                <a href="${resetLink}" class="button">Create New Password</a>
+                <p style="margin-top: 32px; font-size: 12px; color: #999;">If the button doesn't work, copy and paste this link:<br><span style="word-break: break-all; color: #eab308;">${resetLink}</span></p>
+            </div>
+            <div class="footer">
+                &copy; ${year} Stranger Mingle &mdash; a brand of Salty Media Production (OPC) Pvt Ltd.
+            </div>
+        </div>
+    </body>
+    </html>
+    `;
+}

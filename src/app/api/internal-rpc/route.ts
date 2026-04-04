@@ -48,7 +48,8 @@ export async function POST(req: Request) {
             email: decodedToken.email,
             displayName: decodedToken.name, // Firebase 'name' claims
             phoneNumber: decodedToken.phone_number,
-            mappedUserId: mappedUserId
+            mappedUserId: mappedUserId,
+            provider: decodedToken.firebase?.sign_in_provider
         });
 
       } catch (e: any) {
@@ -90,9 +91,10 @@ export async function POST(req: Request) {
     // For specific interaction functions, we'll be explicit.
     
     const authenticatedFunctions = [
-        'toggleEventLike', 'toggleEventSave', 'setEventInterest', 
-        'submitEventReview', 'checkUserInteraction', 'createOrUpdateUserProfile',
-        'getUserProfileByUserId', 'getUserSubscription'
+        'getUserProfileByUserId', 'updateUserProfile', 'getUserSubscription',
+        'createGroup', 'joinGroup', 'leaveGroup', 'getUserGroups',
+        'createLocation', 'createCategory', 'updateGroup', 'getGroup', 'getGroups', 'uploadGroupImage',
+        'getConversations', 'getMessages', 'sendMessage', 'startConversation', 'getAvailableMembers'
     ];
 
     if (authenticatedFunctions.includes(functionName)) {
@@ -107,8 +109,20 @@ export async function POST(req: Request) {
             if (processedArgs[0] && typeof processedArgs[0] === 'object') {
                 processedArgs[0].user_id = mappedUserId;
             }
-        } else if (functionName === 'getUserProfileByUserId' || functionName === 'getUserSubscription') {
+        } else if (['getUserProfileByUserId', 'updateUserProfile', 'getUserSubscription', 'createGroup', 'joinGroup', 'leaveGroup', 'getUserGroups', 'updateGroup', 'uploadGroupImage', 'getGroup', 'getGroups', 'getConversations', 'getAvailableMembers'].includes(functionName)) {
             processedArgs[0] = mappedUserId;
+        } else if (functionName === 'getMessages') {
+            // (conversationId, userId)
+            processedArgs[1] = mappedUserId;
+        } else if (functionName === 'sendMessage') {
+            // (conversationId, userId, content)
+            processedArgs[0] = args[0];
+            processedArgs[1] = mappedUserId;
+            processedArgs[2] = args[1];
+        } else if (functionName === 'startConversation') {
+            // (userId, targetUserId)
+            processedArgs[0] = mappedUserId;
+            processedArgs[1] = args[0];
         } else if (functionName === 'createOrUpdateUserProfile') {
             if (processedArgs[0] && typeof processedArgs[0] === 'object') {
                 processedArgs[0].user_id = mappedUserId;
@@ -125,7 +139,7 @@ export async function POST(req: Request) {
     }
 
     // 6. Execution
-    console.log(`[RPC] Executing ${functionName} with ${mappedUserId ? 'Authenticated' : 'Guest'} context`);
+    console.log(`[RPC] Executing ${functionName} with args:`, JSON.stringify(processedArgs));
     const result = await fn(...processedArgs);
 
     return NextResponse.json({ result });

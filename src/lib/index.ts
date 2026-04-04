@@ -6,3 +6,6 @@ export * from './firebase-admin';
 export * from './payment-utils';
 export * from './razorpay';
 export * from './email';
+export * from './groupService';
+export * from './metaService';
+export * from './chatService';
