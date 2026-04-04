@@ -27,7 +27,9 @@ export async function POST(req: NextRequest) {
 
         // 2. Create the Subscription in Razorpay
         // Determine total count based on plan: Monthly (120 cycles = 10 years) vs Yearly (10 cycles = 10 years)
-        const PLAN_YEARLY = 'plan_SRHZEI4lcH5QUm';
+        const PLAN_YEARLY = process.env.RAZORPAY_PLAN_YEARLY;
+        const PLAN_MONTHLY = process.env.RAZORPAY_PLAN_MONTHLY;
+        
         const isYearly = planId === PLAN_YEARLY;
         const totalCount = isYearly ? 10 : 120; // 10 years for both (1 year/cycle vs 1 month/cycle)
 
