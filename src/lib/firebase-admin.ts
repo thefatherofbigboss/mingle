@@ -1,5 +1,4 @@
 import * as admin from 'firebase-admin';
-import { getApps } from 'firebase-admin/app';
 import fs from 'fs';
 import path from 'path';
 
