@@ -362,7 +362,7 @@ export async function getEventsByCity(city: string): Promise<Event[]> {
     if (!data || data.length === 0) return [];
 
     // Fetch ticket tiers from availability view for these events
-    const eventIds = data.map(e => e.id);
+    const eventIds = data.map((e: PublicEventRow) => e.id);
     const { data: tiers, error: tiersError } = await supabase
         .from('v_ticket_availability')
         .select('*')
@@ -372,13 +372,13 @@ export async function getEventsByCity(city: string): Promise<Event[]> {
         console.error('Error fetching tiers from view:', tiersError);
     }
 
-    return data.map(row => mapPublicViewToEvent(row, tiers || []));
+    return data.map((row: PublicEventRow) => mapPublicViewToEvent(row, tiers || []));
 }
 
 function mapPublicViewToEvent(row: PublicEventRow, tiers: TicketAvailabilityRow[]): Event {
     const eventTiers = tiers
-        .filter(t => t.event_id === row.id)
-        .map(t => ({
+        .filter((t: TicketAvailabilityRow) => t.event_id === row.id)
+        .map((t: TicketAvailabilityRow) => ({
             id: t.tier_id,
             event_id: t.event_id,
             name: t.tier_name,
@@ -485,7 +485,7 @@ export async function getAllLiveEvents(): Promise<Event[]> {
     if (!data || data.length === 0) return [];
 
     // Fetch ticket tiers from availability view for these events
-    const eventIds = data.map(e => e.id);
+    const eventIds = data.map((e: PublicEventRow) => e.id);
     const { data: tiers, error: tiersError } = await supabase
         .from('v_ticket_availability')
         .select('*')
@@ -495,7 +495,7 @@ export async function getAllLiveEvents(): Promise<Event[]> {
         console.error('Error fetching tiers from view:', tiersError);
     }
 
-    return data.map(row => mapPublicViewToEvent(row, tiers || []));
+    return data.map((row: PublicEventRow) => mapPublicViewToEvent(row, tiers || []));
 }
 
 export async function getFeaturedEvents(limit: number = 6): Promise<Event[]> {
@@ -515,13 +515,13 @@ export async function getFeaturedEvents(limit: number = 6): Promise<Event[]> {
 
     if (!data || data.length === 0) return [];
 
-    const eventIds = data.map(e => e.id);
+    const eventIds = data.map((e: PublicEventRow) => e.id);
     const { data: tiers } = await supabase
         .from('v_ticket_availability')
         .select('*')
         .in('event_id', eventIds);
 
-    return data.map(row => mapPublicViewToEvent(row, tiers || []));
+    return data.map((row: PublicEventRow) => mapPublicViewToEvent(row, tiers || []));
 }
 
 export async function getSponsoredEvents(limit: number = 3): Promise<Event[]> {
@@ -544,13 +544,13 @@ export async function getSponsoredEvents(limit: number = 3): Promise<Event[]> {
 
     if (!data || data.length === 0) return [];
 
-    const eventIds = data.map(e => e.id);
+    const eventIds = data.map((e: PublicEventRow) => e.id);
     const { data: tiers } = await supabase
         .from('v_ticket_availability')
         .select('*')
         .in('event_id', eventIds);
 
-    return data.map(row => mapPublicViewToEvent(row, tiers || []));
+    return data.map((row: PublicEventRow) => mapPublicViewToEvent(row, tiers || []));
 }
 
 export async function getAllCompletedEvents(): Promise<Event[]> {
@@ -569,13 +569,13 @@ export async function getAllCompletedEvents(): Promise<Event[]> {
 
     if (!data || data.length === 0) return [];
 
-    const eventIds = data.map(e => e.id);
+    const eventIds = data.map((e: PublicEventRow) => e.id);
     const { data: tiers } = await supabase
         .from('v_ticket_availability')
         .select('*')
         .in('event_id', eventIds);
 
-    return data.map(row => mapPublicViewToEvent(row, tiers || []));
+    return data.map((row: PublicEventRow) => mapPublicViewToEvent(row, tiers || []));
 }
 
 
@@ -616,7 +616,7 @@ export async function getPublicEventById(id: string): Promise<Event | null> {
         .from('v_events_public')
         .select('*')
         .eq('id', id)
-        .single();
+        .maybeSingle();
 
     if (error || !eventRow) {
         if (error && error.code !== 'PGRST116') {
@@ -654,7 +654,7 @@ export async function getPublicEventBySlug(slug: string): Promise<Event | null> 
         query = query.eq('slug', slug);
     }
 
-    const { data: eventRow, error } = await query.single();
+    const { data: eventRow, error } = await query.maybeSingle();
 
     if (error || !eventRow) {
         if (error && error.code !== 'PGRST116') {
@@ -799,7 +799,7 @@ export async function getUpcomingEventsForCity(city: string, limit: number = 6):
 
     // 2. If we have less than the limit, fill with events from other cities
     if (results.length < limit) {
-        const excludeIds = results.map(e => e.id);
+        const excludeIds = results.map((e: PublicEventRow) => e.id);
         const { data: otherEvents } = await supabase
             .from('v_events_public')
             .select('*')
@@ -815,13 +815,13 @@ export async function getUpcomingEventsForCity(city: string, limit: number = 6):
     }
 
     if (results.length > 0) {
-        const eventIds = results.map(e => e.id);
+        const eventIds = results.map((e: PublicEventRow) => e.id);
         const { data: tiers } = await supabase
             .from('v_ticket_availability')
             .select('*')
             .in('event_id', eventIds);
 
-        return results.map(row => mapPublicViewToEvent(row, tiers || []));
+        return results.map((row: PublicEventRow) => mapPublicViewToEvent(row, tiers || []));
     }
 
     return [];
@@ -846,13 +846,13 @@ export async function getEventsByHostDisplayName(displayName: string): Promise<E
 
     if (!data || data.length === 0) return [];
 
-    const eventIds = data.map(e => e.id);
+    const eventIds = data.map((e: PublicEventRow) => e.id);
     const { data: tiers } = await supabase
         .from('v_ticket_availability')
         .select('*')
         .in('event_id', eventIds);
 
-    return data.map(row => mapPublicViewToEvent(row, tiers || []));
+    return data.map((row: PublicEventRow) => mapPublicViewToEvent(row, tiers || []));
 }
 export async function getUpcomingEvents(limit: number = 6): Promise<Event[]> {
     const supabase = sharedClient;
@@ -873,13 +873,13 @@ export async function getUpcomingEvents(limit: number = 6): Promise<Event[]> {
 
     if (!data || data.length === 0) return [];
 
-    const eventIds = data.map(e => e.id);
+    const eventIds = data.map((e: PublicEventRow) => e.id);
     const { data: tiers } = await supabase
         .from('v_ticket_availability')
         .select('*')
         .in('event_id', eventIds);
 
-    return data.map(row => mapPublicViewToEvent(row, tiers || []));
+    return data.map((row: PublicEventRow) => mapPublicViewToEvent(row, tiers || []));
 }
 
 export async function getWeekendEvents(limit: number = 6): Promise<Event[]> {
@@ -902,7 +902,7 @@ export async function getWeekendEvents(limit: number = 6): Promise<Event[]> {
 
     if (!data || data.length === 0) return [];
 
-    const weekendEvents = data.filter(row => {
+    const weekendEvents = data.filter((row: PublicEventRow) => {
         const date = new Date(row.start_datetime);
         const day = date.getDay(); // 0: Sun, 5: Fri, 6: Sat
         return day === 0 || day === 5 || day === 6;
@@ -910,13 +910,13 @@ export async function getWeekendEvents(limit: number = 6): Promise<Event[]> {
 
     if (weekendEvents.length === 0) return [];
 
-    const eventIds = weekendEvents.map(e => e.id);
+    const eventIds = weekendEvents.map((e: PublicEventRow) => e.id);
     const { data: tiers } = await supabase
         .from('v_ticket_availability')
         .select('*')
         .in('event_id', eventIds);
 
-    return weekendEvents.map(row => mapPublicViewToEvent(row, tiers || []));
+    return weekendEvents.map((row: PublicEventRow) => mapPublicViewToEvent(row, tiers || []));
 }
 
 export async function getTrendingEvents(limit: number = 2): Promise<Event[]> {
@@ -938,13 +938,13 @@ export async function getTrendingEvents(limit: number = 2): Promise<Event[]> {
 
     if (!data || data.length === 0) return [];
 
-    const eventIds = data.map(e => e.id);
+    const eventIds = data.map((e: PublicEventRow) => e.id);
     const { data: tiers } = await supabase
         .from('v_ticket_availability')
         .select('*')
         .in('event_id', eventIds);
 
-    return data.map(row => mapPublicViewToEvent(row, tiers || []));
+    return data.map((row: PublicEventRow) => mapPublicViewToEvent(row, tiers || []));
 }
 
 /**
@@ -970,13 +970,13 @@ export async function getOnlineEvents(limit: number = 10): Promise<Event[]> {
 
     if (!data || data.length === 0) return [];
 
-    const eventIds = data.map(e => e.id);
+    const eventIds = data.map((e: PublicEventRow) => e.id);
     const { data: tiers } = await supabase
         .from('v_ticket_availability')
         .select('*')
         .in('event_id', eventIds);
 
-    return data.map(row => mapPublicViewToEvent(row, tiers || []));
+    return data.map((row: PublicEventRow) => mapPublicViewToEvent(row, tiers || []));
 }
 
 /**
@@ -1002,13 +1002,13 @@ export async function getRecurringEvents(limit: number = 10): Promise<Event[]> {
 
     if (!data || data.length === 0) return [];
 
-    const eventIds = data.map(e => e.id);
+    const eventIds = data.map((e: PublicEventRow) => e.id);
     const { data: tiers } = await supabase
         .from('v_ticket_availability')
         .select('*')
         .in('event_id', eventIds);
 
-    return data.map(row => mapPublicViewToEvent(row, tiers || []));
+    return data.map((row: PublicEventRow) => mapPublicViewToEvent(row, tiers || []));
 }
 
 export interface VenuePartner {
@@ -1067,7 +1067,7 @@ export async function getAllVenuePartners(): Promise<VenuePartner[]> {
     // Create a map for event counts per location
     const eventCountMap = new Map<string, number>();
     if (events) {
-        events.forEach(e => {
+        events.forEach((e: any) => {
             if (e.location_id) {
                 eventCountMap.set(e.location_id, (eventCountMap.get(e.location_id) || 0) + 1);
             }
@@ -1075,7 +1075,7 @@ export async function getAllVenuePartners(): Promise<VenuePartner[]> {
     }
 
     // 3. Map to VenuePartner interface
-    return locations.map(loc => {
+    return locations.map((loc: any) => {
         const partner = (loc.venue_partners as any)?.[0] || {};
         return {
             venue_name: loc.venue_name || 'Unnamed Venue',
@@ -1093,7 +1093,7 @@ export async function getAllVenuePartners(): Promise<VenuePartner[]> {
             amenities: partner.amenities || [],
             is_active: partner.is_active !== false // Default to true
         } as VenuePartner;
-    }).sort((a, b) => b.event_count - a.event_count);
+    }).sort((a: VenuePartner, b: VenuePartner) => b.event_count - a.event_count);
 }
 
 /**
@@ -1133,7 +1133,7 @@ export async function getVenuePartnersByCity(city: string): Promise<VenuePartner
 
     const eventCountMap = new Map<string, number>();
     if (events) {
-        events.forEach(e => {
+        events.forEach((e: any) => {
             if (e.location_id) {
                 eventCountMap.set(e.location_id, (eventCountMap.get(e.location_id) || 0) + 1);
             }
@@ -1141,7 +1141,7 @@ export async function getVenuePartnersByCity(city: string): Promise<VenuePartner
     }
 
     // 3. Map output
-    return locations.map(loc => {
+    return locations.map((loc: any) => {
         const partner = (loc.venue_partners as any)?.[0] || {};
         return {
             venue_name: loc.venue_name || 'Unnamed Venue',
@@ -1159,7 +1159,7 @@ export async function getVenuePartnersByCity(city: string): Promise<VenuePartner
             amenities: partner.amenities || [],
             is_active: partner.is_active !== false
         } as VenuePartner;
-    }).sort((a, b) => b.event_count - a.event_count);
+    }).sort((a: VenuePartner, b: VenuePartner) => b.event_count - a.event_count);
 }
 
 /**
@@ -1181,7 +1181,7 @@ export async function getUpcomingVenuePartners(): Promise<VenuePartner[]> {
         return [];
     }
 
-    const locationIds = Array.from(new Set(upcomingEvents.map(e => e.location_id).filter(Boolean)));
+    const locationIds = Array.from(new Set(upcomingEvents.map((e: any) => e.location_id).filter(Boolean)));
 
     if (locationIds.length === 0) return [];
 
@@ -1216,14 +1216,14 @@ export async function getUpcomingVenuePartners(): Promise<VenuePartner[]> {
 
     const eventCountMap = new Map<string, number>();
     if (allEvents) {
-        allEvents.forEach(e => {
+        allEvents.forEach((e: any) => {
             if (e.location_id) {
                 eventCountMap.set(e.location_id, (eventCountMap.get(e.location_id) || 0) + 1);
             }
         });
     }
 
-    return locations.map(loc => {
+    return locations.map((loc: any) => {
         const partner = (loc.venue_partners as any)?.[0] || {};
         return {
             venue_name: loc.venue_name || 'Unnamed Venue',
@@ -1241,5 +1241,5 @@ export async function getUpcomingVenuePartners(): Promise<VenuePartner[]> {
             amenities: partner.amenities || [],
             is_active: partner.is_active !== false
         } as VenuePartner;
-    }).sort((a, b) => b.event_count - a.event_count);
+    }).sort((a: VenuePartner, b: VenuePartner) => b.event_count - a.event_count);
 }
