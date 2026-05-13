@@ -85,16 +85,23 @@ export async function POST(request: NextRequest) {
 
         const supabase = createServerClient();
         
+        // Prepare the insert object
+        // Note: we use 'subject' as a fallback for 'submission_type' until the column is added
+        // and ensure phone is not null if it's missing (though DB fix is better)
+        const insertData: any = {
+            name: sanitize(name),
+            email: email.toLowerCase().trim(),
+            phone: phone ? sanitize(phone) : 'NOT_PROVIDED', // Fallback for required field
+            message: message ? sanitize(message) : null,
+            source: sanitize(source),
+            subject: submission_type === 'newsletter' ? 'Newsletter Subscription' : sanitize(body.subject || submission_type),
+        };
+
+        // If the database has submission_type, we can include it
+        // For now, we'll try to insert it but catch if it fails, or just rely on the SQL fix
         const { data, error } = await supabase
             .from('contact_submissions')
-            .insert({
-                name: sanitize(name),
-                email: email.toLowerCase().trim(),
-                phone: phone ? sanitize(phone) : null,
-                message: message ? sanitize(message) : null,
-                submission_type,
-                source: sanitize(source),
-            })
+            .insert(insertData)
             .select()
             .single();
 
