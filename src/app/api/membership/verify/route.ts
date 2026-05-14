@@ -104,7 +104,7 @@ export async function POST(req: NextRequest) {
 
         // 6. Send Verification Email
         try {
-            const appUrl = process.env.NEXT_PUBLIC_APP_URL || 'https://strangermingle.com';
+            const appUrl = process.env.NEXT_PUBLIC_APP_URL || 'https://www.strangermingle.com';
             const verificationLink = `${appUrl}/verify-membership?token=${verificationToken}`;
             
             console.log(`[Verify] Sending verification email to: ${finalSub.customer_email}`);

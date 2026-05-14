@@ -28,7 +28,7 @@ export async function POST(req: NextRequest) {
             
             // 2. Generate a localized reset link
             // Use the environment's host or hardcoded production domain
-            const host = process.env.NEXT_PUBLIC_APP_URL || 'https://strangermingle.com';
+            const host = process.env.NEXT_PUBLIC_APP_URL || 'https://www.strangermingle.com';
             const actionCodeSettings = {
                 url: `${host}/reset-password`,
                 handleCodeInApp: true,
