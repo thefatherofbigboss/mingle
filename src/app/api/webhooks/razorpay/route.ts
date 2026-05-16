@@ -92,6 +92,44 @@ export async function POST(request: NextRequest) {
             }
         }
 
+        // Handle subscription cancellation
+        if (event === 'subscription.cancelled' || event === 'subscription.expired') {
+            const { subscription } = payload.payload;
+            if (subscription && subscription.entity && subscription.entity.id) {
+                const razorpaySubscriptionId = subscription.entity.id;
+                const supabase = createAdminClient();
+
+                await supabase
+                    .from('user_subscriptions')
+                    .update({
+                        status: event === 'subscription.expired' ? 'expired' : 'cancelled',
+                        cancel_at_period_end: false, // Reset since it's fully cancelled now
+                        updated_at: new Date().toISOString()
+                    })
+                    .eq('razorpay_subscription_id', razorpaySubscriptionId);
+            }
+        }
+
+        // Handle subscription updates (e.g., payment method change)
+        if (event === 'subscription.updated') {
+            const { subscription } = payload.payload;
+            if (subscription && subscription.entity && subscription.entity.id) {
+                const razorpaySubscriptionId = subscription.entity.id;
+                const supabase = createAdminClient();
+
+                const currentEnd = subscription.entity.current_end ? new Date(subscription.entity.current_end * 1000).toISOString() : null;
+
+                await supabase
+                    .from('user_subscriptions')
+                    .update({
+                        status: subscription.entity.status, // Sync the status (could be active, paused, etc)
+                        current_period_end: currentEnd,
+                        updated_at: new Date().toISOString()
+                    })
+                    .eq('razorpay_subscription_id', razorpaySubscriptionId);
+            }
+        }
+
         return NextResponse.json({ status: 'ok' });
     } catch (error: unknown) {
         console.error('Webhook error:', error);

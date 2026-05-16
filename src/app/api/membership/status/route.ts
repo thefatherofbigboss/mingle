@@ -155,7 +155,8 @@ export async function GET(req: NextRequest) {
                 isMember: true, 
                 plan: subscription.razorpay_plan_id,
                 is_verified: subscription.is_verified,
-                expiry: expiryDate
+                expiry: expiryDate,
+                cancel_at_period_end: !!subscription.cancel_at_period_end
             });
         }
 
