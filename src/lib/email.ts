@@ -16,7 +16,7 @@ export async function sendEmail({
     to,
     subject,
     html,
-    from = 'team@strangermingle.com',
+    from = 'Stranger Mingle <team@strangermingle.com>',
     cc = [],
     attachments = [],
 }: {

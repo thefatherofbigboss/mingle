@@ -113,7 +113,7 @@ export async function POST(req: NextRequest) {
                 to: finalSub.customer_email,
                 subject: 'Verify Your Stranger Mingle Membership',
                 html: generateMembershipVerificationHtml(finalSub.customer_name, verificationLink),
-                from: 'team@strangermingle.com'
+                from: 'Stranger Mingle <team@strangermingle.com>'
             });
             
             console.log(`[Verify] Email sent successfully`);

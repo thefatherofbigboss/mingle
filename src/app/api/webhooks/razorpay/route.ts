@@ -70,6 +70,43 @@ export async function POST(request: NextRequest) {
                 const currentStart = subscription.entity.current_start ? new Date(subscription.entity.current_start * 1000).toISOString() : null;
                 const currentEnd = subscription.entity.current_end ? new Date(subscription.entity.current_end * 1000).toISOString() : null;
 
+                // --- SOLUTION A fallback: Fetch subscription to check if it needs self-healing/user-provisioning ---
+                const { data: currentSub } = await supabase
+                    .from('user_subscriptions')
+                    .select('*')
+                    .eq('razorpay_subscription_id', razorpaySubscriptionId)
+                    .maybeSingle();
+
+                let finalUserId = currentSub?.user_id || null;
+                let verificationToken = currentSub?.verification_token || null;
+                let shouldSendEmail = false;
+
+                if (currentSub) {
+                    // 1. Auto-provision user ID if missing
+                    if (!finalUserId) {
+                        console.log(`[Webhook] User ID missing for subscription ${razorpaySubscriptionId}. Auto-provisioning identity...`);
+                        try {
+                            const { findOrCreateUserByContact } = await import('@/lib/userProfile');
+                            finalUserId = await findOrCreateUserByContact({
+                                email: currentSub.customer_email,
+                                phone: currentSub.customer_phone,
+                                name: currentSub.customer_name
+                            });
+                            console.log(`[Webhook] Auto-provisioned user ID: ${finalUserId}`);
+                        } catch (provisionErr) {
+                            console.error('[Webhook] Failed to auto-provision user:', provisionErr);
+                        }
+                    }
+
+                    // 2. Generate verification token if missing and not verified
+                    if (!verificationToken && !currentSub.is_verified) {
+                        const { v4: uuidv4 } = await import('uuid');
+                        verificationToken = uuidv4();
+                        shouldSendEmail = true;
+                        console.log(`[Webhook] Generated new verification token: ${verificationToken}`);
+                    }
+                }
+
                 // Update both old and new tables for backward compatibility until fully migrated
                 await Promise.all([
                     supabase
@@ -83,12 +120,35 @@ export async function POST(request: NextRequest) {
                         .from('user_subscriptions')
                         .update({
                             status: 'active',
+                            user_id: finalUserId,
+                            verification_token: verificationToken,
                             current_period_start: currentStart,
                             current_period_end: currentEnd,
                             updated_at: new Date().toISOString()
                         })
                         .eq('razorpay_subscription_id', razorpaySubscriptionId)
                 ]);
+
+                // 3. Send email if needed
+                if (shouldSendEmail && currentSub && currentSub.customer_email) {
+                    try {
+                        const { sendEmail, generateMembershipVerificationHtml } = await import('@/lib/email');
+                        const appUrl = process.env.NEXT_PUBLIC_APP_URL || 'https://www.strangermingle.com';
+                        const verificationLink = `${appUrl}/verify-membership?token=${verificationToken}`;
+                        
+                        console.log(`[Webhook] Sending auto-recovered verification email to: ${currentSub.customer_email}`);
+                        
+                        await sendEmail({
+                            to: currentSub.customer_email,
+                            subject: 'Verify Your Stranger Mingle Membership',
+                            html: generateMembershipVerificationHtml(currentSub.customer_name || 'Premium Member', verificationLink),
+                            from: 'Stranger Mingle <team@strangermingle.com>'
+                        });
+                        console.log('[Webhook] Auto-recovered verification email sent successfully');
+                    } catch (emailErr) {
+                        console.error('[Webhook] Failed to send auto-recovered verification email:', emailErr);
+                    }
+                }
             }
         }
 
