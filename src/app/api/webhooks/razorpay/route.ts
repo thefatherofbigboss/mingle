@@ -38,6 +38,10 @@ export async function POST(request: NextRequest) {
             });
 
             if (!result.success) {
+                if (result.error === 'Booking not found') {
+                    console.log(`[Webhook] Order ${razorpayOrderId} not found in bookings table. Ignoring since it could be a subscription payment.`);
+                    return NextResponse.json({ status: 'ignored', message: 'Order not found in bookings' });
+                }
                 console.error('Payment processing failed in webhook:', result.error);
                 return NextResponse.json({ error: result.error || 'Failed to process payment' }, { status: 500 });
             }
