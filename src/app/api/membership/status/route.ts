@@ -64,6 +64,27 @@ export async function GET(req: NextRequest) {
 
         const supabase = createAdminClient();
 
+        // Self-heal: paid on Razorpay but still "created" in DB (verify/webhook missed)
+        const { data: pendingSub } = await supabase
+            .from('user_subscriptions')
+            .select('*')
+            .or(`customer_email.eq.${email},user_id.eq.${mappedUserId}`)
+            .in('status', ['created', 'authenticated'])
+            .order('created_at', { ascending: false })
+            .limit(1)
+            .maybeSingle();
+
+        if (pendingSub?.razorpay_subscription_id) {
+            const { activateSubscription } = await import('@/lib/activate-subscription');
+            const healResult = await activateSubscription({
+                razorpaySubscriptionId: pendingSub.razorpay_subscription_id,
+                source: 'status',
+            });
+            if (healResult.success) {
+                console.log(`[Status] Self-healed pending subscription for ${email}`);
+            }
+        }
+
         // 1. Check for active subscription for this email OR user_id
         const { data: subscription, error } = await supabase
             .from('user_subscriptions')

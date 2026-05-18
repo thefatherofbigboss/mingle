@@ -69,6 +69,30 @@ export async function GET(req: NextRequest) {
                 
                 const hasMismatch = statusMismatch || cancelMismatch || expiryMismatch;
                 
+                const needsFullActivation =
+                    ['created', 'authenticated'].includes(dbStatus) &&
+                    ['active', 'completed', 'authenticated'].includes(rzpStatus);
+
+                if (needsFullActivation) {
+                    mismatchCount++;
+                    const { activateSubscription } = await import('@/lib/activate-subscription');
+                    const activation = await activateSubscription({
+                        razorpaySubscriptionId: subId,
+                        source: 'sync',
+                    });
+                    if (activation.success) {
+                        fixedCount++;
+                        report.push({
+                            name: dbSub.customer_name || 'N/A',
+                            email: dbSub.customer_email || 'N/A',
+                            id: subId,
+                            mismatches: `Full activation (${dbStatus} → active)`,
+                            repaired: 'YES',
+                        });
+                        continue;
+                    }
+                }
+
                 if (hasMismatch) {
                     mismatchCount++;
                     

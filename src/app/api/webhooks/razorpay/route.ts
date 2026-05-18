@@ -2,25 +2,34 @@ import { NextRequest, NextResponse } from 'next/server';
 import { verifyWebhookSignature } from '@/lib/razorpay';
 import { processPaymentSuccess } from '@/lib/payment-utils';
 import { createAdminClient } from '@/lib/supabaseClient';
-import { v4 as uuidv4 } from 'uuid';
-import { findOrCreateUserByContact } from '@/lib/userProfile';
-import { sendEmail, generateMembershipVerificationHtml } from '@/lib/email';
+import { activateSubscription } from '@/lib/activate-subscription';
+
+const SUBSCRIPTION_PAYMENT_EVENTS = new Set([
+    'subscription.charged',
+    'subscription.authenticated',
+    'subscription.activated',
+    'subscription.completed',
+]);
 
 export async function POST(request: NextRequest) {
     try {
         const rawBody = await request.text();
         const signature = request.headers.get('x-razorpay-signature');
-        const webhookSecret = process.env.RAZORPAY_WEBHOOK_SECRET || process.env.RAZORPAY_KEY_SECRET; // Fallback to key secret if not provided
+        const webhookSecret = process.env.RAZORPAY_WEBHOOK_SECRET;
 
-        // Verify webhook signature if secret and signature are available
         if (signature && webhookSecret) {
             const isValid = verifyWebhookSignature(rawBody, signature, webhookSecret);
             if (!isValid) {
-                console.error('Invalid Razorpay webhook signature');
+                console.error('[Webhook] Invalid Razorpay webhook signature — check RAZORPAY_WEBHOOK_SECRET in backend env');
                 return NextResponse.json({ error: 'Invalid signature' }, { status: 401 });
             }
+        } else if (signature && !webhookSecret) {
+            console.error(
+                '[Webhook] x-razorpay-signature present but RAZORPAY_WEBHOOK_SECRET is not set. ' +
+                    'Add the webhook secret from Razorpay Dashboard → Webhooks.'
+            );
         } else {
-            console.warn('Razorpay webhook received without signature verification (Secret missing)');
+            console.warn('[Webhook] Processing without signature verification');
         }
 
         const payload = JSON.parse(rawBody);
@@ -30,7 +39,7 @@ export async function POST(request: NextRequest) {
             const { order, payment } = payload.payload;
             const razorpayOrderId = order.entity.id;
             const razorpayPaymentId = payment.entity.id;
-            const razorpaySignature = signature || 'WEBHOOK'; // Fallback if sig not in header
+            const razorpaySignature = signature || 'WEBHOOK';
             const razorpayMethod = payment.entity.method;
 
             const result = await processPaymentSuccess({
@@ -42,7 +51,9 @@ export async function POST(request: NextRequest) {
 
             if (!result.success) {
                 if (result.error === 'Booking not found') {
-                    console.log(`[Webhook] Order ${razorpayOrderId} not found in bookings table. Ignoring since it could be a subscription payment.`);
+                    console.log(
+                        `[Webhook] Order ${razorpayOrderId} not found in bookings table. Ignoring (likely subscription payment).`
+                    );
                     return NextResponse.json({ status: 'ignored', message: 'Order not found in bookings' });
                 }
                 console.error('Payment processing failed in webhook:', result.error);
@@ -50,7 +61,6 @@ export async function POST(request: NextRequest) {
             }
         }
 
-        // Handle payment failure
         if (event === 'payment.failed') {
             const { payment } = payload.payload;
             const razorpayOrderId = payment.entity.order_id;
@@ -58,110 +68,39 @@ export async function POST(request: NextRequest) {
 
             await supabase
                 .from('bookings')
-                .update({ 
+                .update({
                     payment_status: 'failed',
                     status: 'failed',
-                    updated_at: new Date().toISOString()
+                    updated_at: new Date().toISOString(),
                 })
                 .eq('razorpay_order_id', razorpayOrderId)
                 .eq('payment_status', 'unpaid');
         }
 
-        // Handle subscription successful charge / authentication
-        if (event === 'subscription.charged' || event === 'subscription.authenticated') {
+        if (SUBSCRIPTION_PAYMENT_EVENTS.has(event)) {
             const { subscription, payment } = payload.payload;
-            if (subscription && subscription.entity && subscription.entity.id) {
+            if (subscription?.entity?.id) {
                 const razorpaySubscriptionId = subscription.entity.id;
                 const razorpayPaymentId = payment?.entity?.id || null;
-                const supabase = createAdminClient();
 
-                const currentStart = subscription.entity.current_start ? new Date(subscription.entity.current_start * 1000).toISOString() : null;
-                const currentEnd = subscription.entity.current_end ? new Date(subscription.entity.current_end * 1000).toISOString() : null;
+                console.log(`[Webhook] Activating subscription ${razorpaySubscriptionId} (event: ${event})`);
 
-                // --- SOLUTION A fallback: Fetch subscription to check if it needs self-healing/user-provisioning ---
-                const { data: currentSub } = await supabase
-                    .from('user_subscriptions')
-                    .select('*')
-                    .eq('razorpay_subscription_id', razorpaySubscriptionId)
-                    .maybeSingle();
+                const result = await activateSubscription({
+                    razorpaySubscriptionId,
+                    razorpayPaymentId,
+                    source: 'webhook',
+                });
 
-                let finalUserId = currentSub?.user_id || null;
-                let verificationToken = currentSub?.verification_token || null;
-                let shouldSendEmail = false;
-
-                if (currentSub) {
-                    // 1. Auto-provision user ID if missing
-                    if (!finalUserId) {
-                        console.log(`[Webhook] User ID missing for subscription ${razorpaySubscriptionId}. Auto-provisioning identity...`);
-                        try {
-                            finalUserId = await findOrCreateUserByContact({
-                                email: currentSub.customer_email,
-                                phone: currentSub.customer_phone,
-                                name: currentSub.customer_name
-                            });
-                            console.log(`[Webhook] Auto-provisioned user ID: ${finalUserId}`);
-                        } catch (provisionErr) {
-                            console.error('[Webhook] Failed to auto-provision user:', provisionErr);
-                        }
-                    }
-
-                    // 2. Generate verification token if missing and not verified
-                    if (!verificationToken && !currentSub.is_verified) {
-                        verificationToken = uuidv4();
-                        shouldSendEmail = true;
-                        console.log(`[Webhook] Generated new verification token: ${verificationToken}`);
-                    }
-                }
-
-                // Update both old and new tables for backward compatibility until fully migrated
-                await Promise.all([
-                    supabase
-                        .from('subscriptions')
-                        .update({
-                            status: 'active',
-                            updated_at: new Date().toISOString()
-                        })
-                        .eq('razorpay_subscription_id', razorpaySubscriptionId),
-                    supabase
-                        .from('user_subscriptions')
-                        .update({
-                            status: 'active',
-                            user_id: finalUserId,
-                            verification_token: verificationToken,
-                            current_period_start: currentStart,
-                            current_period_end: currentEnd,
-                            ...(razorpayPaymentId ? { razorpay_payment_id: razorpayPaymentId } : {}),
-                            updated_at: new Date().toISOString()
-                        })
-                        .eq('razorpay_subscription_id', razorpaySubscriptionId)
-                ]);
-
-                // 3. Send email if needed
-                if (shouldSendEmail && currentSub && currentSub.customer_email) {
-                    try {
-                        const appUrl = process.env.NEXT_PUBLIC_APP_URL || 'https://www.strangermingle.com';
-                        const verificationLink = `${appUrl}/verify-membership?token=${verificationToken}`;
-                        
-                        console.log(`[Webhook] Sending auto-recovered verification email to: ${currentSub.customer_email}`);
-                        
-                        await sendEmail({
-                            to: currentSub.customer_email,
-                            subject: 'Verify Your Stranger Mingle Membership',
-                            html: generateMembershipVerificationHtml(currentSub.customer_name || 'Premium Member', verificationLink),
-                            from: 'Stranger Mingle <team@strangermingle.com>'
-                        });
-                        console.log('[Webhook] Auto-recovered verification email sent successfully');
-                    } catch (emailErr) {
-                        console.error('[Webhook] Failed to send auto-recovered verification email:', emailErr);
-                    }
+                if (!result.success) {
+                    console.error(`[Webhook] Activation failed for ${razorpaySubscriptionId}:`, result.error);
+                    return NextResponse.json({ error: result.error || 'Activation failed' }, { status: 500 });
                 }
             }
         }
 
-        // Handle subscription cancellation
         if (event === 'subscription.cancelled' || event === 'subscription.expired') {
             const { subscription } = payload.payload;
-            if (subscription && subscription.entity && subscription.entity.id) {
+            if (subscription?.entity?.id) {
                 const razorpaySubscriptionId = subscription.entity.id;
                 const supabase = createAdminClient();
 
@@ -169,28 +108,29 @@ export async function POST(request: NextRequest) {
                     .from('user_subscriptions')
                     .update({
                         status: event === 'subscription.expired' ? 'expired' : 'cancelled',
-                        cancel_at_period_end: false, // Reset since it's fully cancelled now
-                        updated_at: new Date().toISOString()
+                        cancel_at_period_end: false,
+                        updated_at: new Date().toISOString(),
                     })
                     .eq('razorpay_subscription_id', razorpaySubscriptionId);
             }
         }
 
-        // Handle subscription updates (e.g., payment method change)
         if (event === 'subscription.updated') {
             const { subscription } = payload.payload;
-            if (subscription && subscription.entity && subscription.entity.id) {
+            if (subscription?.entity?.id) {
                 const razorpaySubscriptionId = subscription.entity.id;
                 const supabase = createAdminClient();
 
-                const currentEnd = subscription.entity.current_end ? new Date(subscription.entity.current_end * 1000).toISOString() : null;
+                const currentEnd = subscription.entity.current_end
+                    ? new Date(subscription.entity.current_end * 1000).toISOString()
+                    : null;
 
                 await supabase
                     .from('user_subscriptions')
                     .update({
-                        status: subscription.entity.status, // Sync the status (could be active, paused, etc)
+                        status: subscription.entity.status,
                         current_period_end: currentEnd,
-                        updated_at: new Date().toISOString()
+                        updated_at: new Date().toISOString(),
                     })
                     .eq('razorpay_subscription_id', razorpaySubscriptionId);
             }

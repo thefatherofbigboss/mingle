@@ -6,18 +6,20 @@ export async function POST(req: NextRequest) {
     try {
         console.log(`[Backend API] POST /api/subscription received`);
         const body = await req.json();
-        const { planId, name, email, phone } = body;
+        const { planId, name: rawName, email: rawEmail, phone: rawPhone } = body;
+
+        const name = rawName?.trim();
+        const email = rawEmail?.trim().toLowerCase();
+        const phone = rawPhone?.trim();
 
         if (!planId || !name || !email || !phone) {
             return NextResponse.json({ error: 'Missing required fields' }, { status: 400 });
         }
 
-
         // Clean up the phone number to ensure it starts with country code, but mostly keeping it raw
         const contactStr = phone.startsWith('+') ? phone : `+91${phone}`;
 
         // 1. Create Customer in Razorpay (Required for subscriptions)
-        // Check if customer exists or just create a new one every time (simple approach)
         const customer = await razorpay.customers.create({
             name,
             email,
@@ -68,7 +70,11 @@ export async function POST(req: NextRequest) {
         });
 
         if (dbError) {
-             console.error('Initial user_subscription insertion error:', dbError);
+            console.error('Initial user_subscription insertion error:', dbError);
+            return NextResponse.json(
+                { success: false, error: 'Failed to save subscription. Please try again.' },
+                { status: 500 }
+            );
         }
 
         return NextResponse.json({

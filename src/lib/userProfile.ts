@@ -211,7 +211,14 @@ export async function findOrCreateUserByContact(data: {
     name?: string;
 }): Promise<string | null> {
     const supabase = createAdminClient();
-    const { email, phone, name } = data;
+    const email = data.email?.trim().toLowerCase();
+    const phone = data.phone?.trim() || undefined;
+    const name = data.name?.trim() || undefined;
+
+    if (!email) {
+        console.error('[UserService] findOrCreateUserByContact called without email');
+        return null;
+    }
 
     // 1. Try to find existing
     const query = supabase.from('users').select('id');
@@ -224,28 +231,45 @@ export async function findOrCreateUserByContact(data: {
         return existing.id;
     }
 
-    // 2. Create new skeleton record
+    // 2. Create new skeleton record (retry on rare alias/username collision)
     console.log(`[UserService] Creating skeleton record for new customer: ${email}`);
-    const { data: created, error } = await supabase
-        .from('users')
-        .insert({
-            id: uuidv4(), // Standard V4 UUID
-            email: email,
-            phone: phone || null,
-            username: name || email.split('@')[0],
-            anonymous_alias: `Stranger_${Math.floor(1000 + Math.random() * 9000)}`, // Required NOT NULL
-            role: 'member',
-            updated_at: new Date().toISOString()
-        })
-        .select('id')
-        .single();
+    const baseUsername = (name || email.split('@')[0]).slice(0, 50);
 
-    if (error) {
+    for (let attempt = 0; attempt < 3; attempt++) {
+        const suffix = attempt === 0 ? '' : `_${attempt}`;
+        const { data: created, error } = await supabase
+            .from('users')
+            .insert({
+                id: uuidv4(),
+                email,
+                phone: phone || null,
+                username: `${baseUsername}${suffix}`.slice(0, 60),
+                anonymous_alias: `Stranger_${Math.floor(1000 + Math.random() * 9000)}`,
+                role: 'member',
+                updated_at: new Date().toISOString(),
+            })
+            .select('id')
+            .single();
+
+        if (!error && created) {
+            return created.id;
+        }
+
+        if (error?.code === '23505') {
+            const { data: existingAfterRace } = await supabase
+                .from('users')
+                .select('id')
+                .eq('email', email)
+                .maybeSingle();
+            if (existingAfterRace) return existingAfterRace.id;
+            continue;
+        }
+
         console.error('[UserService] Error creating skeleton user:', error);
         return null;
     }
 
-    return created.id;
+    return null;
 }
 
 /**
