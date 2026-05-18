@@ -126,27 +126,71 @@ export async function GET(req: NextRequest) {
                 }
             }
 
-            // --- SYNC: If expiry date is missing, fetch it from Razorpay ---
+            // --- SYNC: Real-time self-healing with Razorpay ---
             let expiryDate = subscription.current_period_end;
             
-            if (!expiryDate && subscription.razorpay_subscription_id) {
+            if (subscription.razorpay_subscription_id) {
                 try {
-                    console.log(`[Status] Expiry missing for ${email}, syncing from Razorpay...`);
+                    console.log(`[Status] Syncing subscription ${subscription.razorpay_subscription_id} for ${email} with Razorpay...`);
                     const { getRazorpaySubscription } = await import('@/lib/razorpay');
                     const subDetail = await getRazorpaySubscription(subscription.razorpay_subscription_id);
                     
-                    if (subDetail.current_end) {
-                        expiryDate = new Date(subDetail.current_end * 1000).toISOString();
-                        
-                        // Update the DB silently in the background
+                    const rzpStatus = subDetail.status;
+                    const rzpCancelAtEnd = !!(subDetail as any).cancel_at_cycle_end;
+                    const rzpExpiry = subDetail.current_end ? new Date(subDetail.current_end * 1000).toISOString() : null;
+                    
+                    let needsUpdate = false;
+                    const updatePayload: any = {};
+                    
+                    if (subscription.status !== rzpStatus) {
+                        needsUpdate = true;
+                        updatePayload.status = rzpStatus;
+                        subscription.status = rzpStatus; // Update local copy
+                    }
+                    
+                    if (!!subscription.cancel_at_period_end !== rzpCancelAtEnd) {
+                        needsUpdate = true;
+                        updatePayload.cancel_at_period_end = rzpCancelAtEnd;
+                        subscription.cancel_at_period_end = rzpCancelAtEnd; // Update local copy
+                    }
+                    
+                    if (rzpExpiry && expiryDate !== rzpExpiry) {
+                        needsUpdate = true;
+                        updatePayload.current_period_end = rzpExpiry;
+                        expiryDate = rzpExpiry; // Update local copy
+                    }
+                    
+                    if (needsUpdate) {
+                        console.log(`[Status] Self-healing DB mismatch for subscription ${subscription.razorpay_subscription_id}:`, updatePayload);
+                        updatePayload.updated_at = new Date().toISOString();
                         await supabase
                             .from('user_subscriptions')
-                            .update({ current_period_end: expiryDate })
+                            .update(updatePayload)
                             .eq('id', subscription.id);
+                            
+                        // Also update legacy subscriptions table if needed
+                        try {
+                            await supabase
+                                .from('subscriptions')
+                                .update({
+                                    status: rzpStatus,
+                                    updated_at: new Date().toISOString()
+                                })
+                                .eq('razorpay_subscription_id', subscription.razorpay_subscription_id);
+                        } catch (e) {}
                     }
-                } catch (syncErr) {
-                    console.error('[Status] Failed to sync expiry from Razorpay:', syncErr);
+                } catch (syncErr: any) {
+                    const errorMsg = syncErr?.description || syncErr?.error?.description || syncErr?.message || JSON.stringify(syncErr);
+                    console.error('[Status] Failed to sync from Razorpay:', errorMsg);
                 }
+            }
+
+            // If the subscription is no longer active after sync, treat as not a member
+            if (subscription.status !== 'active') {
+                return NextResponse.json({ 
+                    success: true, 
+                    isMember: false 
+                });
             }
             // ----------------------------------------------------------------
 
