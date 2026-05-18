@@ -2,6 +2,9 @@ import { NextRequest, NextResponse } from 'next/server';
 import { verifyWebhookSignature } from '@/lib/razorpay';
 import { processPaymentSuccess } from '@/lib/payment-utils';
 import { createAdminClient } from '@/lib/supabaseClient';
+import { v4 as uuidv4 } from 'uuid';
+import { findOrCreateUserByContact } from '@/lib/userProfile';
+import { sendEmail, generateMembershipVerificationHtml } from '@/lib/email';
 
 export async function POST(request: NextRequest) {
     try {
@@ -90,7 +93,6 @@ export async function POST(request: NextRequest) {
                     if (!finalUserId) {
                         console.log(`[Webhook] User ID missing for subscription ${razorpaySubscriptionId}. Auto-provisioning identity...`);
                         try {
-                            const { findOrCreateUserByContact } = await import('@/lib/userProfile');
                             finalUserId = await findOrCreateUserByContact({
                                 email: currentSub.customer_email,
                                 phone: currentSub.customer_phone,
@@ -104,7 +106,6 @@ export async function POST(request: NextRequest) {
 
                     // 2. Generate verification token if missing and not verified
                     if (!verificationToken && !currentSub.is_verified) {
-                        const { v4: uuidv4 } = await import('uuid');
                         verificationToken = uuidv4();
                         shouldSendEmail = true;
                         console.log(`[Webhook] Generated new verification token: ${verificationToken}`);
@@ -136,7 +137,6 @@ export async function POST(request: NextRequest) {
                 // 3. Send email if needed
                 if (shouldSendEmail && currentSub && currentSub.customer_email) {
                     try {
-                        const { sendEmail, generateMembershipVerificationHtml } = await import('@/lib/email');
                         const appUrl = process.env.NEXT_PUBLIC_APP_URL || 'https://www.strangermingle.com';
                         const verificationLink = `${appUrl}/verify-membership?token=${verificationToken}`;
                         
