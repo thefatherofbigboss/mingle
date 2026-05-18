@@ -116,21 +116,54 @@ export async function sendMessage(conversationId: string, userId: string, conten
         last_message_preview: content.length > 50 ? content.substring(0, 47) + '...' : content
     }).eq('id', conversationId);
 
-    // 3. Broadcast refresh signal (non-blocking)
-    const channel = supabase.channel(`conversation:${conversationId}`);
-    channel.subscribe((status) => {
-        if (status === 'SUBSCRIBED') {
-            channel.send({
-                type: 'broadcast',
-                event: 'refresh',
-                payload: { conversation_id: conversationId, sender_id: userId }
-            }).then(() => {
-                supabase.removeChannel(channel);
-            });
-        }
-    });
+    // 3. Broadcast refresh signal (non-blocking, always tears down channel)
+    void broadcastConversationRefresh(supabase, conversationId, userId);
 
     return message;
+}
+
+async function broadcastConversationRefresh(
+    supabase: ReturnType<typeof createAdminClient>,
+    conversationId: string,
+    userId: string
+) {
+    const channel = supabase.channel(`conversation:${conversationId}`);
+
+    const teardown = () => {
+        supabase.removeChannel(channel);
+    };
+
+    try {
+        await new Promise<void>((resolve) => {
+            const timeout = setTimeout(() => {
+                teardown();
+                resolve();
+            }, 3000);
+
+            channel.subscribe((status) => {
+                if (status === 'SUBSCRIBED') {
+                    channel
+                        .send({
+                            type: 'broadcast',
+                            event: 'refresh',
+                            payload: { conversation_id: conversationId, sender_id: userId },
+                        })
+                        .finally(() => {
+                            clearTimeout(timeout);
+                            teardown();
+                            resolve();
+                        });
+                } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+                    clearTimeout(timeout);
+                    teardown();
+                    resolve();
+                }
+            });
+        });
+    } catch (err) {
+        console.error('[ChatService] Broadcast refresh failed:', err);
+        teardown();
+    }
 }
 
 /**
