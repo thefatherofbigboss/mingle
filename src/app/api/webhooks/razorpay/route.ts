@@ -69,9 +69,10 @@ export async function POST(request: NextRequest) {
 
         // Handle subscription successful charge / authentication
         if (event === 'subscription.charged' || event === 'subscription.authenticated') {
-            const { subscription } = payload.payload;
+            const { subscription, payment } = payload.payload;
             if (subscription && subscription.entity && subscription.entity.id) {
                 const razorpaySubscriptionId = subscription.entity.id;
+                const razorpayPaymentId = payment?.entity?.id || null;
                 const supabase = createAdminClient();
 
                 const currentStart = subscription.entity.current_start ? new Date(subscription.entity.current_start * 1000).toISOString() : null;
@@ -129,6 +130,7 @@ export async function POST(request: NextRequest) {
                             verification_token: verificationToken,
                             current_period_start: currentStart,
                             current_period_end: currentEnd,
+                            ...(razorpayPaymentId ? { razorpay_payment_id: razorpayPaymentId } : {}),
                             updated_at: new Date().toISOString()
                         })
                         .eq('razorpay_subscription_id', razorpaySubscriptionId)
