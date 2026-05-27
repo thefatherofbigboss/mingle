@@ -20,10 +20,14 @@ export function toISTISOString(dateTime: string): string {
         });
         
         const parts = formatter.formatToParts(date);
-        const p: Record<string, string> = {};
-        parts.forEach(part => { p[part.type] = part.value; });
+        const year = parts.find(p => p.type === 'year')?.value;
+        const month = parts.find(p => p.type === 'month')?.value;
+        const day = parts.find(p => p.type === 'day')?.value;
+        const hour = parts.find(p => p.type === 'hour')?.value;
+        const minute = parts.find(p => p.type === 'minute')?.value;
+        const second = parts.find(p => p.type === 'second')?.value;
         
-        return `${p.year}-${p.month}-${p.day}T${p.hour}:${p.minute}:${p.second}+05:30`;
+        return `${year}-${month}-${day}T${hour}:${minute}:${second}+05:30`;
     } catch (e) {
         console.error('Error formatting IST ISO string:', e);
         return dateTime;
