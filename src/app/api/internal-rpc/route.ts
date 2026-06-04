@@ -71,6 +71,10 @@ export async function POST(req: Request) {
     const { functionName, args = [] } = body;
 
     // 4. Function Resolution
+    if (typeof functionName !== 'string' || !Object.prototype.hasOwnProperty.call(libFunctions, functionName)) {
+      console.error(`[RPC] Invalid or unsupported method requested.`);
+      return NextResponse.json({ error: `Function not allowed or not found` }, { status: 404 });
+    }
     const fn = (libFunctions as any)[functionName];
 
     if (!fn || typeof fn !== 'function') {
@@ -144,7 +148,7 @@ export async function POST(req: Request) {
 
     return NextResponse.json({ result });
   } catch (error: any) {
-    console.error(`[RPC] Fatal Error in ${req.url}:`, error);
+    console.error(`[RPC] Fatal Error in ${encodeURI(req.url)}:`, error);
     return NextResponse.json({ 
       error: 'Internal Server Error', 
       message: error.message 
