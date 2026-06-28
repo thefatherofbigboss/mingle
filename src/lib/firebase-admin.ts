@@ -60,6 +60,14 @@ function initializeFirebaseAdmin() {
           serviceAccount.private_key = key;
       }
 
+      if (typeof serviceAccount.client_email === 'string') {
+          serviceAccount.client_email = serviceAccount.client_email.replace(/^"|"$/g, '');
+      }
+
+      if (typeof serviceAccount.project_id === 'string') {
+          serviceAccount.project_id = serviceAccount.project_id.replace(/^"|"$/g, '');
+      }
+
       console.log(`[Firebase Admin] Initializing for project: ${serviceAccount.project_id}`);
       return admin.initializeApp({
         credential: admin.credential.cert(serviceAccount),
