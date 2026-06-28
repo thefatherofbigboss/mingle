@@ -48,9 +48,16 @@ function initializeFirebaseAdmin() {
     }
 
     if (serviceAccount) {
-      // Ensure private key has correct newline characters if they were escaped
-      if (typeof serviceAccount.private_key === 'string' && serviceAccount.private_key.includes('\\n')) {
-          serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
+      if (typeof serviceAccount.private_key === 'string') {
+          // 1. Remove surrounding quotes if the user accidentally pasted them
+          let key = serviceAccount.private_key.replace(/^"|"$/g, '');
+          
+          // 2. Replace escaped literal '\n' with actual newlines
+          if (key.includes('\\n')) {
+              key = key.replace(/\\n/g, '\n');
+          }
+          
+          serviceAccount.private_key = key;
       }
 
       console.log(`[Firebase Admin] Initializing for project: ${serviceAccount.project_id}`);
