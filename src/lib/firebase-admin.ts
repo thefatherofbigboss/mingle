@@ -61,11 +61,11 @@ function initializeFirebaseAdmin() {
       }
 
       if (typeof serviceAccount.client_email === 'string') {
-          serviceAccount.client_email = serviceAccount.client_email.replace(/^"|"$/g, '');
+          serviceAccount.client_email = serviceAccount.client_email.replace(/^"|"$/g, '').trim();
       }
 
       if (typeof serviceAccount.project_id === 'string') {
-          serviceAccount.project_id = serviceAccount.project_id.replace(/^"|"$/g, '');
+          serviceAccount.project_id = serviceAccount.project_id.replace(/^"|"$/g, '').trim();
       }
 
       console.log(`[Firebase Admin] Initializing for project: ${serviceAccount.project_id}`);
