@@ -3,7 +3,7 @@ import { adminAuth } from '@/lib/firebase-admin';
 import { sendEmail, generatePasswordResetHtml } from '@/lib/email';
 
 const CORS_HEADERS = {
-    'Access-Control-Allow-Origin': 'http://localhost:3002', // Whitelist local frontend
+    'Access-Control-Allow-Origin': '*', // Allow all domains for this public endpoint
     'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type, Authorization',
 };
