@@ -27,8 +27,10 @@ export async function POST(req: NextRequest) {
             const user = await adminAuth.getUserByEmail(cleanEmail);
             
             // 2. Generate a localized reset link
-            // Use the environment's host or hardcoded production domain
-            const host = process.env.NEXT_PUBLIC_APP_URL || 'https://www.strangermingle.com';
+            // Use the exact origin that requested it so it goes back to www, admin, or host appropriately.
+            const origin = req.headers.get('origin');
+            const host = origin || process.env.NEXT_PUBLIC_APP_URL || 'https://www.strangermingle.com';
+            
             const actionCodeSettings = {
                 url: `${host}/reset-password`,
                 handleCodeInApp: true,
