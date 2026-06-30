@@ -350,6 +350,45 @@ export async function linkSubscriptionToUser(userId: string, email: string, phon
     }
 }
 
+export async function getUserBookings(userId: string) {
+    if (!userId || userId === 'undefined') {
+        return [];
+    }
+    const supabase = createAdminClient();
+    try {
+        const { data: user } = await supabase.from('users').select('email, phone').eq('id', userId).maybeSingle();
+        const userEmail = user?.email;
+        const userPhone = user?.phone;
+
+        let query = supabase
+            .from('bookings')
+            .select('*, events(*, locations(*)), booking_items(*, ticket_tiers(*))');
+
+        const orConditions = [`user_id.eq.${userId}`];
+        if (userEmail) orConditions.push(`attendee_email.eq.${userEmail}`);
+        
+        if (userPhone) {
+            const normalizedPhone = userPhone.replace(/\D/g, '');
+            if (normalizedPhone.length >= 10) {
+                const last10 = normalizedPhone.slice(-10);
+                orConditions.push(`attendee_phone.like.*${last10}*`);
+            } else {
+                orConditions.push(`attendee_phone.eq.${userPhone}`);
+            }
+        }
+
+        query = query.or(orConditions.join(','));
+
+        const { data, error } = await query.order('created_at', { ascending: false });
+            
+        if (error) throw error;
+        return data || [];
+    } catch (e: any) {
+        console.error('[UserService] Error fetching user bookings:', e);
+        return [];
+    }
+}
+
 /**
  * Fetch a user's subscription details with Proactive Sync
  */

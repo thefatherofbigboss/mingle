@@ -169,11 +169,21 @@ export async function getGroups(userId: string | null) {
         if (error) throw error;
         
         // Enrich with membership status if userId provided
+        let joinedGroupIds = new Set<string>();
+        if (cleanUserId) {
+            const { data: memberships } = await supabase
+                .from('group_members')
+                .select('group_id')
+                .eq('user_id', cleanUserId);
+            if (memberships) {
+                memberships.forEach(m => joinedGroupIds.add(m.group_id));
+            }
+        }
+
         const enrichedGroups = data.map((g: any) => ({
             ...g,
             is_owner: cleanUserId ? g.owner_id === cleanUserId : false,
-            // For is_joined, we could do another query, but for now let's keep it simple
-            // or we can join with group_members for the current user.
+            is_joined: joinedGroupIds.has(g.id)
         }));
 
         return { success: true, groups: enrichedGroups };
@@ -251,8 +261,16 @@ export async function getUserGroups(userId: string) {
 
         if (error) throw error;
 
-        const owned = memberships.filter(m => m.role === 'owner').map(m => m.group);
-        const joined = memberships.filter(m => m.role !== 'owner').map(m => m.group);
+        const owned = memberships.filter(m => m.role === 'owner').map(m => ({
+            ...m.group,
+            is_owner: true,
+            is_joined: true
+        }));
+        const joined = memberships.filter(m => m.role !== 'owner').map(m => ({
+            ...m.group,
+            is_owner: false,
+            is_joined: true
+        }));
 
         return { success: true, owned, joined };
     } catch (error: any) {

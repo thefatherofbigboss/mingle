@@ -41,9 +41,9 @@ export async function getConversations(userId: string) {
             last_message_at: conv.last_message_at,
             last_message_preview: conv.last_message_preview,
             other_participant: {
-                id: otherParticipant.id,
-                anonymous_alias: otherParticipant.anonymous_alias,
-                avatar_url: otherParticipant.avatar_url
+                id: otherParticipant?.id || '',
+                anonymous_alias: otherParticipant?.anonymous_alias || 'Unknown User',
+                avatar_url: otherParticipant?.avatar_url
             },
             is_muted: isP1 ? conv.is_muted_by_p1 : conv.is_muted_by_p2,
             is_blocked: isP1 ? conv.is_blocked_by_p1 : conv.is_blocked_by_p2

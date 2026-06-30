@@ -3,6 +3,9 @@ import { getEventById } from '@/lib/events';
 import { createServerClient, createAdminClient } from '@/lib/supabaseClient';
 import { createRazorpayOrder } from '@/lib/razorpay';
 import { processPaymentSuccess } from '@/lib/payment-utils';
+import { adminAuth } from '@/lib/firebase-admin';
+import { v5 as uuidv5 } from 'uuid';
+import { SM_UUID_NAMESPACE } from '@/lib';
 
 // Rate limiting for payment orders
 const orderCache = new Map<string, number[]>();
@@ -95,6 +98,18 @@ export async function POST(request: NextRequest) {
         const supabase = createServerClient();
         const { data: { user: authUser } } = await supabase.auth.getUser();
         let userId = authUser?.id || null;
+
+        const bearerHeader = request.headers.get('Authorization');
+        if (!userId && bearerHeader && bearerHeader.startsWith('Bearer ')) {
+            const idToken = bearerHeader.split('Bearer ')[1];
+            try {
+                const decodedToken = await adminAuth.verifyIdToken(idToken);
+                userId = uuidv5(decodedToken.uid, SM_UUID_NAMESPACE);
+                console.log(`[Checkout] Authenticated via Firebase token. UserID: ${userId}`);
+            } catch (e: any) {
+                console.warn('[Checkout] Firebase token verification failed:', e.message);
+            }
+        }
 
         // NEW LOGIC: If guest, find or create user profile to fix 500 error (user_id is mandatory)
         if (!userId && sanitizedEmail) {

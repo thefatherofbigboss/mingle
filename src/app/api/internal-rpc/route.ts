@@ -98,7 +98,8 @@ export async function POST(req: Request) {
         'getUserProfileByUserId', 'updateUserProfile', 'getUserSubscription',
         'createGroup', 'joinGroup', 'leaveGroup', 'getUserGroups',
         'createLocation', 'createCategory', 'updateGroup', 'getGroup', 'getGroups', 'uploadGroupImage',
-        'getConversations', 'getMessages', 'sendMessage', 'startConversation', 'getAvailableMembers'
+        'getConversations', 'getMessages', 'sendMessage', 'startConversation', 'getAvailableMembers',
+        'getUserBookings'
     ];
 
     if (authenticatedFunctions.includes(functionName)) {
@@ -113,7 +114,7 @@ export async function POST(req: Request) {
             if (processedArgs[0] && typeof processedArgs[0] === 'object') {
                 processedArgs[0].user_id = mappedUserId;
             }
-        } else if (['getUserProfileByUserId', 'updateUserProfile', 'getUserSubscription', 'createGroup', 'joinGroup', 'leaveGroup', 'getUserGroups', 'updateGroup', 'uploadGroupImage', 'getGroup', 'getGroups', 'getConversations', 'getAvailableMembers'].includes(functionName)) {
+        } else if (['getUserProfileByUserId', 'updateUserProfile', 'getUserSubscription', 'createGroup', 'joinGroup', 'leaveGroup', 'getUserGroups', 'updateGroup', 'uploadGroupImage', 'getGroup', 'getGroups', 'getConversations', 'getAvailableMembers', 'getUserBookings'].includes(functionName)) {
             processedArgs[0] = mappedUserId;
         } else if (functionName === 'getMessages') {
             // (conversationId, userId)
