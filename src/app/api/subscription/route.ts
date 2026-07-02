@@ -83,7 +83,8 @@ export async function POST(req: NextRequest) {
             customerId: customer.id,
             customerName: name,
             customerEmail: email,
-            customerPhone: phone
+            customerPhone: phone,
+            keyId: process.env.RAZORPAY_KEY_ID
         });
 
     } catch (error: any) {
