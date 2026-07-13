@@ -95,6 +95,7 @@ export async function POST(request: NextRequest) {
             message: message ? sanitize(message) : null,
             source: sanitize(source),
             subject: submission_type === 'newsletter' ? 'Newsletter Subscription' : sanitize(body.subject || submission_type),
+            city: body.city ? sanitize(body.city) : null,
         };
 
         // If the database has submission_type, we can include it

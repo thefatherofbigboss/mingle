@@ -500,11 +500,13 @@ export async function getAllLiveEvents(): Promise<Event[]> {
 
 export async function getFeaturedEvents(limit: number = 6): Promise<Event[]> {
     const supabase = sharedClient;
+    const now = new Date().toISOString();
 
     const { data, error } = await supabase
         .from('v_events_public')
         .select('*')
         .eq('is_featured', true)
+        .gte('end_datetime', now)
         .order('start_datetime', { ascending: true })
         .limit(limit);
 

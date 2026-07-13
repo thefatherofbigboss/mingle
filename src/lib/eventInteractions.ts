@@ -107,3 +107,94 @@ export async function checkUserInteraction(eventId: string, userId: string) {
         interest: interestRes.data?.interest_type || null
     };
 }
+
+export async function joinEventWaitlist(userId: string, eventId: string) {
+    const supabase = createAdminClient();
+    
+    // Check if already in waitlist
+    const { data: existing } = await supabase
+        .from('event_waitlist')
+        .select('id')
+        .eq('event_id', eventId)
+        .eq('user_id', userId)
+        .maybeSingle();
+
+    if (existing) {
+        return { action: 'already_joined', message: 'You are already on the waitlist.' };
+    }
+
+    // Get current position (simple count)
+    const { count } = await supabase
+        .from('event_waitlist')
+        .select('*', { count: 'exact', head: true })
+        .eq('event_id', eventId);
+
+    const { error } = await supabase
+        .from('event_waitlist')
+        .insert({
+            event_id: eventId,
+            user_id: userId,
+            position: (count || 0) + 1,
+            status: 'waiting'
+        });
+
+    if (error) throw error;
+    return { action: 'joined', message: 'You have been added to the waitlist!' };
+}
+
+export async function getEventDiscussions(eventId: string) {
+    const supabase = createAdminClient();
+    const { data, error } = await supabase
+        .from('event_discussions')
+        .select(`
+            *,
+            user:users!event_discussions_user_id_fkey(username, avatar_url)
+        `)
+        .eq('event_id', eventId)
+        .is('is_deleted', false)
+        .order('is_pinned', { ascending: false })
+        .order('created_at', { ascending: true });
+        
+    if (error) throw error;
+    return data;
+}
+
+export async function postEventDiscussion(userId: string, eventId: string, parentId: string | null, message: string) {
+    const supabase = createAdminClient();
+    const { data, error } = await supabase
+        .from('event_discussions')
+        .insert({
+            event_id: eventId,
+            user_id: userId,
+            parent_id: parentId,
+            message: message.trim(),
+            is_host_reply: false
+        })
+        .select()
+        .single();
+        
+    if (error) throw error;
+    return data;
+}
+
+export async function likeEventDiscussion(userId: string, messageId: string) {
+    const supabase = createAdminClient();
+    const { error: rpcError } = await supabase.rpc('increment_discussion_like', { msg_id: messageId });
+    const { error: insertError } = await supabase
+        .from('discussion_likes')
+        .insert({ discussion_id: messageId, user_id: userId });
+        
+    if (insertError && rpcError) throw insertError;
+    return { success: true };
+}
+
+export async function deleteEventDiscussion(userId: string, messageId: string) {
+    const supabase = createAdminClient();
+    const { error } = await supabase
+        .from('event_discussions')
+        .update({ is_deleted: true, deleted_by: userId })
+        .eq('id', messageId);
+        
+    if (error) throw error;
+    return { success: true };
+}
