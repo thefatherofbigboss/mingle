@@ -1,31 +1,49 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { verifyRazorpaySubscriptionSignature } from '@/lib/razorpay';
+import { verifyRazorpaySignature, verifyRazorpaySubscriptionSignature } from '@/lib/razorpay';
 import { activateSubscription } from '@/lib/activate-subscription';
 
 export async function POST(req: NextRequest) {
     try {
         const body = await req.json();
-        const { razorpay_payment_id, razorpay_subscription_id, razorpay_signature } = body;
+        const { 
+            razorpay_payment_id, 
+            razorpay_order_id, 
+            razorpay_subscription_id, 
+            razorpay_signature 
+        } = body;
 
-        console.log(`[Verify] Processing signature for sub: ${razorpay_subscription_id}`);
+        console.log(`[Verify] Processing signature for order: ${razorpay_order_id || razorpay_subscription_id}`);
 
-        if (!razorpay_payment_id || !razorpay_subscription_id || !razorpay_signature) {
-            return NextResponse.json({ error: 'Missing required fields' }, { status: 400 });
+        if (!razorpay_payment_id || !razorpay_signature || (!razorpay_order_id && !razorpay_subscription_id)) {
+            return NextResponse.json({ error: 'Missing required payment verification fields' }, { status: 400 });
         }
 
-        const isValid = verifyRazorpaySubscriptionSignature(
-            razorpay_subscription_id,
-            razorpay_payment_id,
-            razorpay_signature
-        );
+        let isValid = false;
+
+        if (razorpay_order_id) {
+            // Verify Standard One-Time Razorpay Order signature: HMAC(order_id + "|" + payment_id)
+            isValid = verifyRazorpaySignature(
+                razorpay_order_id,
+                razorpay_payment_id,
+                razorpay_signature
+            );
+        } else if (razorpay_subscription_id) {
+            // Legacy Subscription signature verification: HMAC(payment_id + "|" + subscription_id)
+            isValid = verifyRazorpaySubscriptionSignature(
+                razorpay_subscription_id,
+                razorpay_payment_id,
+                razorpay_signature
+            );
+        }
 
         if (!isValid) {
-            console.error('[Verify] Invalid signature');
+            console.error('[Verify] Invalid payment signature');
             return NextResponse.json({ error: 'Invalid payment signature' }, { status: 401 });
         }
 
         const result = await activateSubscription({
-            razorpaySubscriptionId: razorpay_subscription_id,
+            razorpayOrderId: razorpay_order_id || null,
+            razorpaySubscriptionId: razorpay_subscription_id || null,
             razorpayPaymentId: razorpay_payment_id,
             source: 'verify',
         });

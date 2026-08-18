@@ -7,7 +7,8 @@ import { sendEmail, generateMembershipVerificationHtml } from './email';
 export type ActivateSubscriptionSource = 'verify' | 'webhook' | 'sync' | 'status';
 
 export interface ActivateSubscriptionParams {
-    razorpaySubscriptionId: string;
+    razorpayOrderId?: string | null;
+    razorpaySubscriptionId?: string | null;
     razorpayPaymentId?: string | null;
     source: ActivateSubscriptionSource;
     /** Re-send verification email even if a token already exists */
@@ -28,34 +29,52 @@ function normalizeEmail(email?: string | null): string | null {
 }
 
 /**
- * Single source of truth for turning a paid Razorpay subscription into an active membership.
+ * Single source of truth for turning a paid Razorpay order/subscription into an active membership.
  * Used by payment verify, webhooks, status self-healing, and sync jobs.
  */
 export async function activateSubscription(
     params: ActivateSubscriptionParams
 ): Promise<ActivateSubscriptionResult> {
-    const { razorpaySubscriptionId, razorpayPaymentId, source, forceResendEmail } = params;
+    const { razorpayOrderId, razorpaySubscriptionId, razorpayPaymentId, source, forceResendEmail } = params;
     const supabase = createAdminClient();
 
-    let row = await supabase
-        .from('user_subscriptions')
-        .select('*')
-        .eq('razorpay_subscription_id', razorpaySubscriptionId)
-        .maybeSingle()
-        .then(({ data }) => data);
+    let row: any = null;
+
+    // 1. Look up by razorpayOrderId first, then fallback to razorpaySubscriptionId
+    if (razorpayOrderId) {
+        const { data } = await supabase
+            .from('user_subscriptions')
+            .select('*')
+            .eq('razorpay_order_id', razorpayOrderId)
+            .maybeSingle();
+        row = data;
+    }
+
+    if (!row && razorpaySubscriptionId) {
+        const { data } = await supabase
+            .from('user_subscriptions')
+            .select('*')
+            .eq('razorpay_subscription_id', razorpaySubscriptionId)
+            .maybeSingle();
+        row = data;
+    }
 
     let rzpSub: Awaited<ReturnType<typeof getRazorpaySubscription>> | null = null;
 
-    try {
-        rzpSub = await getRazorpaySubscription(razorpaySubscriptionId);
-    } catch (rzpErr) {
-        console.error(`[Activate:${source}] Razorpay fetch failed for ${razorpaySubscriptionId}:`, rzpErr);
-        if (!row) {
-            return { success: false, error: 'Subscription not found in database or Razorpay' };
+    // Fetch Razorpay subscription details only if razorpaySubscriptionId exists
+    if (razorpaySubscriptionId) {
+        try {
+            rzpSub = await getRazorpaySubscription(razorpaySubscriptionId);
+        } catch (rzpErr) {
+            console.error(`[Activate:${source}] Razorpay fetch failed for ${razorpaySubscriptionId}:`, rzpErr);
+            if (!row) {
+                return { success: false, error: 'Subscription not found in database or Razorpay' };
+            }
         }
     }
 
-    if (!row && rzpSub) {
+    // Fallback recovery for legacy subscription mandate if row is missing
+    if (!row && rzpSub && razorpaySubscriptionId) {
         const notes = (rzpSub.notes || {}) as Record<string, string>;
         const email = normalizeEmail(notes.email);
         const { error: insertError } = await supabase.from('user_subscriptions').insert({
@@ -86,12 +105,7 @@ export async function activateSubscription(
         return { success: false, error: 'Subscription record not found' };
     }
 
-    const rzpStatus = rzpSub?.status;
-    const isPaidOnRazorpay =
-        rzpStatus === 'active' ||
-        rzpStatus === 'completed' ||
-        rzpStatus === 'authenticated';
-
+    // If already active and verified
     if (row.status === 'active' && row.user_id && row.verification_token) {
         if (!forceResendEmail) {
             return {
@@ -101,19 +115,6 @@ export async function activateSubscription(
                 userId: row.user_id,
             };
         }
-    }
-
-    if (source === 'verify' && !isPaidOnRazorpay && rzpSub) {
-        console.warn(
-            `[Activate:${source}] Razorpay status is "${rzpStatus}" for ${razorpaySubscriptionId}; proceeding after client signature verification`
-        );
-    }
-
-    if ((source === 'webhook' || source === 'sync' || source === 'status') && rzpSub && !isPaidOnRazorpay) {
-        return {
-            success: false,
-            error: `Razorpay subscription is not active (status: ${rzpStatus || 'unknown'})`,
-        };
     }
 
     const email = normalizeEmail(row.customer_email);
@@ -143,12 +144,22 @@ export async function activateSubscription(
         }
     }
 
-    const currentStart = rzpSub?.current_start
-        ? new Date(rzpSub.current_start * 1000).toISOString()
-        : row.current_period_start;
-    const currentEnd = rzpSub?.current_end
-        ? new Date(rzpSub.current_end * 1000).toISOString()
-        : row.current_period_end;
+    // Determine validity period
+    const now = new Date();
+    const isMonthly = row.plan_type === 'monthly' || row.notes?.plan_type === 'monthly';
+    const validityDays = isMonthly ? 30 : 365;
+
+    let currentStart = now.toISOString();
+    let currentEnd = new Date(now.getTime() + validityDays * 24 * 60 * 60 * 1000).toISOString();
+
+    // If legacy subscription had timestamps from Razorpay
+    if (rzpSub?.current_start && rzpSub?.current_end) {
+        currentStart = new Date(rzpSub.current_start * 1000).toISOString();
+        currentEnd = new Date(rzpSub.current_end * 1000).toISOString();
+    } else if (row.current_period_start && row.current_period_end && source === 'sync') {
+        currentStart = row.current_period_start;
+        currentEnd = row.current_period_end;
+    }
 
     const updatePayload: Record<string, unknown> = {
         status: 'active',
@@ -167,7 +178,7 @@ export async function activateSubscription(
     const { data: updated, error: updateError } = await supabase
         .from('user_subscriptions')
         .update(updatePayload)
-        .eq('razorpay_subscription_id', razorpaySubscriptionId)
+        .eq('id', row.id)
         .select()
         .single();
 
@@ -176,10 +187,62 @@ export async function activateSubscription(
         return { success: false, error: updateError?.message || 'Failed to update subscription' };
     }
 
-    await supabase
-        .from('subscriptions')
-        .update({ status: 'active', updated_at: new Date().toISOString() })
-        .eq('razorpay_subscription_id', razorpaySubscriptionId);
+    // Keep legacy subscriptions table updated if referenced
+    if (row.razorpay_subscription_id) {
+        try {
+            await supabase
+                .from('subscriptions')
+                .update({ status: 'active', updated_at: new Date().toISOString() })
+                .eq('razorpay_subscription_id', row.razorpay_subscription_id);
+        } catch (e) {}
+    }
+
+    // Record Discount Code usage if applied
+    if (updated.discount_code_id) {
+        try {
+            const { data: existingUsage } = await supabase
+                .from('subscription_discount_code_uses')
+                .select('id')
+                .eq('user_subscription_id', updated.id)
+                .eq('discount_code_id', updated.discount_code_id)
+                .maybeSingle();
+
+            if (!existingUsage) {
+                const originalAmt = Number(updated.original_amount) || (isMonthly ? 499 : 1999);
+                const discountAmt = Number(updated.discount_amount) || 0;
+                const finalAmt = Math.max(0, originalAmt - discountAmt);
+
+                await supabase.from('subscription_discount_code_uses').insert({
+                    discount_code_id: updated.discount_code_id,
+                    user_id: updated.user_id || userId || null,
+                    user_subscription_id: updated.id,
+                    razorpay_order_id: updated.razorpay_order_id || null,
+                    razorpay_subscription_id: updated.razorpay_subscription_id || updated.razorpay_order_id || 'ORDER',
+                    discount_amount: discountAmt,
+                    original_amount: originalAmt,
+                    final_amount: finalAmt,
+                });
+
+                const { data: codeData } = await supabase
+                    .from('subscription_discount_codes')
+                    .select('used_count')
+                    .eq('id', updated.discount_code_id)
+                    .single();
+
+                if (codeData) {
+                    await supabase
+                        .from('subscription_discount_codes')
+                        .update({
+                            used_count: (codeData.used_count || 0) + 1,
+                            updated_at: new Date().toISOString()
+                        })
+                        .eq('id', updated.discount_code_id);
+                }
+            }
+        } catch (promoLogErr) {
+            console.error(`[Activate:${source}] Failed to log discount code usage:`, promoLogErr);
+        }
+    }
 
     let emailSent = false;
     const recipientEmail = normalizeEmail(updated.customer_email);

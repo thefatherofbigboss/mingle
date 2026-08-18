@@ -52,9 +52,20 @@ export async function POST(request: NextRequest) {
             if (!result.success) {
                 if (result.error === 'Booking not found') {
                     console.log(
-                        `[Webhook] Order ${razorpayOrderId} not found in bookings table. Ignoring (likely subscription payment).`
+                        `[Webhook] Order ${razorpayOrderId} not found in bookings table. Checking user_subscriptions table.`
                     );
-                    return NextResponse.json({ status: 'ignored', message: 'Order not found in bookings' });
+                    const subResult = await activateSubscription({
+                        razorpayOrderId,
+                        razorpayPaymentId,
+                        source: 'webhook',
+                    });
+
+                    if (subResult.success) {
+                        console.log(`[Webhook] Membership order ${razorpayOrderId} activated successfully via webhook.`);
+                        return NextResponse.json({ status: 'success', message: 'Subscription activated via order webhook' });
+                    }
+
+                    return NextResponse.json({ status: 'ignored', message: 'Order not found in bookings or subscriptions' });
                 }
                 console.error('Payment processing failed in webhook:', result.error);
                 return NextResponse.json({ error: result.error || 'Failed to process payment' }, { status: 500 });

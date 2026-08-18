@@ -74,10 +74,11 @@ export async function GET(req: NextRequest) {
             .limit(1)
             .maybeSingle();
 
-        if (pendingSub?.razorpay_subscription_id) {
+        if (pendingSub?.razorpay_order_id || pendingSub?.razorpay_subscription_id) {
             const { activateSubscription } = await import('@/lib/activate-subscription');
             const healResult = await activateSubscription({
-                razorpaySubscriptionId: pendingSub.razorpay_subscription_id,
+                razorpayOrderId: pendingSub.razorpay_order_id || null,
+                razorpaySubscriptionId: pendingSub.razorpay_subscription_id || null,
                 source: 'status',
             });
             if (healResult.success) {
@@ -211,6 +212,16 @@ export async function GET(req: NextRequest) {
                 return NextResponse.json({ 
                     success: true, 
                     isMember: false 
+                });
+            }
+
+            // Check if membership period has elapsed
+            if (expiryDate && new Date(expiryDate).getTime() < Date.now()) {
+                return NextResponse.json({ 
+                    success: true, 
+                    isMember: false,
+                    isExpired: true,
+                    expiry: expiryDate
                 });
             }
             // ----------------------------------------------------------------
