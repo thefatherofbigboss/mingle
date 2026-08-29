@@ -229,6 +229,7 @@ export async function GET(req: NextRequest) {
             return NextResponse.json({ 
                 success: true, 
                 isMember: true, 
+                userId: subscription.user_id,
                 plan: subscription.razorpay_plan_id,
                 is_verified: subscription.is_verified,
                 expiry: expiryDate,

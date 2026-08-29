@@ -37,20 +37,22 @@ export async function POST(req: Request) {
         const decodedToken = await adminAuth.verifyIdToken(idToken);
         authenticatedUserUid = decodedToken.uid;
         // Map Firebase 'uid' string to a Supabase-compatible UUID
-        mappedUserId = uuidv5(authenticatedUserUid, SM_UUID_NAMESPACE);
-        console.log(`[RPC] User authenticated: ${authenticatedUserUid} (Mapped UUID: ${mappedUserId})`);
-
+        const fallbackMappedId = uuidv5(authenticatedUserUid, SM_UUID_NAMESPACE);
+        
         // AUTO-SYNC: Ensure the corresponding record exists in Supabase public.users
-        // This is non-blocking but essential for initial sign-ups
         const { syncFirebaseUser } = await import('@/lib/userProfile');
-        await syncFirebaseUser({
+        const syncedUser = await syncFirebaseUser({
             uid: authenticatedUserUid,
             email: decodedToken.email,
             displayName: decodedToken.name, // Firebase 'name' claims
             phoneNumber: decodedToken.phone_number,
-            mappedUserId: mappedUserId,
+            mappedUserId: fallbackMappedId,
             provider: decodedToken.firebase?.sign_in_provider
         });
+
+        // Use the actual existing DB user ID (or the mapped deterministic ID)
+        mappedUserId = syncedUser?.id || fallbackMappedId;
+        console.log(`[RPC] User authenticated: ${authenticatedUserUid} (Database User ID: ${mappedUserId})`);
 
       } catch (e: any) {
         console.warn('[RPC] Firebase Token verification failed:', e.message);

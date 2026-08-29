@@ -177,25 +177,21 @@ export async function startConversation(userId: string, targetUserId: string) {
         throw new Error('You cannot start a conversation with yourself.');
     }
 
-    // Normalize IDs to prevent duplicate pairs (p1 < p2)
-    const [p1, p2] = [userId, targetUserId].sort();
-
-    // 1. Check for existing
+    // 1. Check for existing conversation (in either orientation)
     const { data: existing } = await supabase
         .from('conversations')
         .select('id')
-        .eq('participant_1_id', p1)
-        .eq('participant_2_id', p2)
+        .or(`and(participant_1_id.eq.${userId},participant_2_id.eq.${targetUserId}),and(participant_1_id.eq.${targetUserId},participant_2_id.eq.${userId})`)
         .maybeSingle();
 
     if (existing) return existing.id;
 
-    // 2. Create new
+    // 2. Create new conversation
     const { data: created, error } = await supabase
         .from('conversations')
         .insert({
-            participant_1_id: p1,
-            participant_2_id: p2
+            participant_1_id: userId,
+            participant_2_id: targetUserId
         })
         .select('id')
         .single();
@@ -211,14 +207,15 @@ export async function startConversation(userId: string, targetUserId: string) {
 /**
  * Returns other members that the user can chat with.
  */
-export async function getAvailableMembers(userId: string, limit = 20) {
+export async function getAvailableMembers(userId: string, limit = 50) {
     const supabase = createAdminClient();
 
     const { data, error } = await supabase
         .from('users')
         .select('id, anonymous_alias, avatar_url')
         .neq('id', userId)
-        .eq('role', 'member')
+        .eq('is_active', true)
+        .not('anonymous_alias', 'is', null)
         .limit(limit);
 
     if (error) {
