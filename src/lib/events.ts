@@ -726,6 +726,15 @@ export async function createBooking(bookingData: {
     // Generate a unique booking reference
     const booking_ref = `BM-${Math.random().toString(36).substring(2, 8).toUpperCase()}-${Date.now().toString().slice(-4)}`;
 
+    const { data: config } = await supabase.from('platform_config').select('*').single();
+    const platform_fee_pct = config?.platform_fee_pct ?? 10;
+    const gst_rate_pct = config?.gst_rate_pct ?? 18;
+
+    const taxable_amount = bookingData.subtotal - (bookingData.discount_amount || 0);
+    const platform_fee = taxable_amount * (platform_fee_pct / 100);
+    const gst_on_fee = platform_fee * (gst_rate_pct / 100);
+    const host_payout = taxable_amount - platform_fee - gst_on_fee;
+
     // Use a transaction (Supabase doesn't support multi-table transactions easily in JS client, 
     // but we can use a single insert with nested data if it was set up for that, 
     // or just perform sequential inserts since we don't have an RPC for this yet).
@@ -741,9 +750,10 @@ export async function createBooking(bookingData: {
             attendee_phone: bookingData.attendee_phone || null,
             total_amount: bookingData.total_amount,
             subtotal: bookingData.subtotal,
-            taxable_amount: bookingData.subtotal, // Default to subtotal
-            platform_fee: 0, // Default to 0
-            host_payout: bookingData.total_amount, // Default to total for now
+            taxable_amount,
+            platform_fee,
+            gst_on_fee,
+            host_payout,
             discount_amount: bookingData.discount_amount || 0,
             payment_status: bookingData.payment_status || 'unpaid',
             status: 'pending',
