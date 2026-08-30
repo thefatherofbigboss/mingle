@@ -632,7 +632,20 @@ export async function getPublicEventById(id: string): Promise<Event | null> {
         .select('*')
         .eq('event_id', eventRow.id);
 
-    return mapPublicViewToEvent(eventRow, tiers || []);
+    const { data: images } = await supabase.from('event_images').select('*').eq('event_id', eventRow.id).order('sort_order', { ascending: true });
+    const { data: faqs } = await supabase.from('event_faqs').select('*').eq('event_id', eventRow.id).order('sort_order', { ascending: true });
+    const { data: agenda } = await supabase.from('event_agenda').select('*').eq('event_id', eventRow.id).order('sort_order', { ascending: true });
+    const { data: tags } = await supabase.from('event_tags').select('tag:tags(name, slug)').eq('event_id', eventRow.id);
+    const { data: reviews } = await supabase.from('event_reviews').select('*, user:users!event_reviews_user_id_fkey(username, avatar_url)').eq('event_id', eventRow.id);
+
+    const event = mapPublicViewToEvent(eventRow, tiers || []);
+    event.event_images = images || [];
+    event.event_faqs = faqs || [];
+    event.event_agenda = agenda || [];
+    event.event_tags = tags as unknown as EventTag[];
+    event.event_reviews = reviews as unknown as EventReview[];
+
+    return event;
 }
 
 
