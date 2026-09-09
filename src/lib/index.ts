@@ -9,3 +9,5 @@ export * from './email';
 export * from './groupService';
 export * from './metaService';
 export * from './chatService';
+export * from './agoraService';
+export * from './phoneAFriendService';

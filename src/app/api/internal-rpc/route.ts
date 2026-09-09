@@ -101,7 +101,8 @@ export async function POST(req: Request) {
         'createGroup', 'joinGroup', 'leaveGroup', 'getUserGroups',
         'createLocation', 'createCategory', 'updateGroup', 'getGroup', 'getGroups', 'uploadGroupImage',
         'getConversations', 'getMessages', 'sendMessage', 'startConversation', 'getAvailableMembers',
-        'getUserBookings', 'joinEventWaitlist', 'postEventDiscussion', 'likeEventDiscussion', 'deleteEventDiscussion'
+        'getUserBookings', 'joinEventWaitlist', 'postEventDiscussion', 'likeEventDiscussion', 'deleteEventDiscussion',
+        'initiateCall', 'submitCallRating'
     ];
 
     if (authenticatedFunctions.includes(functionName)) {
@@ -111,7 +112,11 @@ export async function POST(req: Request) {
         }
         
         // Find the index of the userId argument. 
-        if (functionName === 'submitEventReview') {
+        if (['initiateCall', 'submitCallRating'].includes(functionName)) {
+            if (processedArgs[0] && typeof processedArgs[0] === 'object') {
+                processedArgs[0].userId = mappedUserId;
+            }
+        } else if (functionName === 'submitEventReview') {
             // reviewData is usually args[0]
             if (processedArgs[0] && typeof processedArgs[0] === 'object') {
                 processedArgs[0].user_id = mappedUserId;
