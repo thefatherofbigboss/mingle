@@ -56,14 +56,21 @@ export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
     const { action, ...payload } = body;
+    const ip =
+      req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ||
+      req.headers.get('x-real-ip') ||
+      req.headers.get('cf-connecting-ip') ||
+      'unknown';
+    const userAgent = req.headers.get('user-agent') || 'unknown';
+    const enrichedPayload = { ...payload, ip, userAgent };
 
     if (action === 'create-order' || action === 'create-payment-order') {
-      const result = await createCallPaymentOrder(payload);
+      const result = await createCallPaymentOrder(enrichedPayload);
       return NextResponse.json(result, { headers });
     }
 
     if (action === 'initiate') {
-      const result = await initiateCall(payload);
+      const result = await initiateCall(enrichedPayload);
       return NextResponse.json(result, { headers });
     }
 

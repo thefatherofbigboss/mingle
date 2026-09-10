@@ -1,8 +1,10 @@
 import { createAdminClient } from './supabaseClient';
 import { generateVoiceToken, getAgoraAppId, isAgoraConfigured } from './agoraService';
 import { v4 as uuidv4, v5 as uuidv5 } from 'uuid';
-import { SM_UUID_NAMESPACE } from './userProfile';
+import { SM_UUID_NAMESPACE, findOrCreateUserByContact } from './userProfile';
 import { createRazorpayOrder, verifyRazorpaySignature } from './razorpay';
+import { sendEmail, generateMembershipVerificationHtml } from './email';
+import { generatePhoneAFriendTicketPdf } from './ticket-generator';
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -271,12 +273,26 @@ export async function createCallPaymentOrder({
   callType = 'instant',
   slotId = null,
   amount,
+  durationMinutes = 15,
+  callerName,
+  callerEmail,
+  callerPhone,
+  deviceFingerprint,
+  ip,
+  userAgent,
 }: {
   userId: string;
   hostId: string;
   callType?: 'instant' | 'scheduled';
   slotId?: string | null;
   amount?: number;
+  durationMinutes?: number;
+  callerName?: string;
+  callerEmail?: string;
+  callerPhone?: string;
+  deviceFingerprint?: string;
+  ip?: string;
+  userAgent?: string;
 }) {
   const db = getDb();
   const resolvedUserId = resolveCallerUuid(userId);
@@ -297,7 +313,14 @@ export async function createCallPaymentOrder({
     throw new Error('This host just went offline. Please choose another host or book an upcoming slot.');
   }
 
-  let finalPrice = Number(amount || hostSettings.rate_per_session || 99.0);
+  const baseRate = Number(hostSettings.rate_per_session || 49.0);
+  const dur = Number(durationMinutes) || 15;
+  const units = Math.max(1, Math.round(dur / 15));
+  let finalPrice = baseRate * units;
+
+  if (amount) {
+    finalPrice = Number(amount);
+  }
 
   if (slotId) {
     const { data: slot } = await db
@@ -309,8 +332,22 @@ export async function createCallPaymentOrder({
     if (!slot || slot.status !== 'available') {
       throw new Error('This slot is already booked or no longer available.');
     }
-    if (slot.price) {
+    if (slot.price && !amount) {
       finalPrice = Number(slot.price);
+    }
+  }
+
+  // Count repeat calls from this device fingerprint silently
+  let repeatCount = 0;
+  if (deviceFingerprint) {
+    try {
+      const { count } = await db
+        .from('phone_a_friend_telemetry')
+        .select('*', { count: 'exact', head: true })
+        .eq('device_fingerprint', deviceFingerprint);
+      repeatCount = count || 0;
+    } catch (e) {
+      console.warn('[PhoneAFriendService] Telemetry lookup warning:', e);
     }
   }
 
@@ -324,6 +361,10 @@ export async function createCallPaymentOrder({
       host_id: hostId,
       user_id: resolvedUserId,
       slot_id: slotId || '',
+      duration_minutes: String(dur),
+      repeat_device_calls: String(repeatCount),
+      caller_email: callerEmail || '',
+      caller_phone: callerPhone || '',
     },
   });
 
@@ -335,6 +376,8 @@ export async function createCallPaymentOrder({
     keyId: process.env.RAZORPAY_KEY_ID || '',
     receipt,
     rate: finalPrice,
+    durationMinutes: dur,
+    repeatCallCount: repeatCount,
   };
 }
 
@@ -346,7 +389,14 @@ export async function initiateCall({
   hostId,
   callType = 'instant',
   slotId = null,
-  amount = 99.0,
+  amount = 49.0,
+  durationMinutes = 15,
+  callerName,
+  callerEmail,
+  callerPhone,
+  deviceFingerprint,
+  ip,
+  userAgent,
   razorpayOrderId,
   razorpayPaymentId,
   razorpaySignature,
@@ -356,6 +406,13 @@ export async function initiateCall({
   callType?: 'instant' | 'scheduled';
   slotId?: string | null;
   amount?: number;
+  durationMinutes?: number;
+  callerName?: string;
+  callerEmail?: string;
+  callerPhone?: string;
+  deviceFingerprint?: string;
+  ip?: string;
+  userAgent?: string;
   razorpayOrderId?: string;
   razorpayPaymentId?: string;
   razorpaySignature?: string;
@@ -372,9 +429,23 @@ export async function initiateCall({
     throw new Error('Payment signature verification failed.');
   }
 
-  // Resolve caller user ID to valid UUID and ensure record exists in users table
-  const resolvedUserId = resolveCallerUuid(userId);
-  await ensureCallerUserExists(db, resolvedUserId);
+  // Provision / link user in public.users
+  let resolvedUserId = resolveCallerUuid(userId);
+  if (callerEmail) {
+    try {
+      const syncedId = await findOrCreateUserByContact({
+        email: callerEmail,
+        phone: callerPhone,
+        name: callerName,
+      });
+      if (syncedId) resolvedUserId = syncedId;
+    } catch (provisionErr) {
+      console.error('[PhoneAFriendService] User sync warning:', provisionErr);
+      await ensureCallerUserExists(db, resolvedUserId);
+    }
+  } else {
+    await ensureCallerUserExists(db, resolvedUserId);
+  }
 
   // Verify host is enabled
   const { data: hostSettings } = await db
@@ -404,11 +475,25 @@ export async function initiateCall({
     }
   }
 
+  // Check how many times this physical device has called us across any email/phone
+  let deviceCallCount = 1;
+  if (deviceFingerprint) {
+    try {
+      const { count } = await db
+        .from('phone_a_friend_telemetry')
+        .select('*', { count: 'exact', head: true })
+        .eq('device_fingerprint', deviceFingerprint);
+      deviceCallCount = (count || 0) + 1;
+    } catch (e) {
+      console.warn('[PhoneAFriendService] Device count query warning:', e);
+    }
+  }
+
   // Unique call reference & agora channel name
   const callRef = `PAF-${Date.now().toString().slice(-6)}-${Math.random().toString(36).substring(2, 6).toUpperCase()}`;
   const agoraChannelName = `paf_${uuidv4().replace(/-/g, '').slice(0, 16)}`;
-
   const callStatus = callType === 'instant' ? 'ringing' : 'pending';
+  const dur = Number(durationMinutes) || 15;
 
   const { data: call, error: callError } = await db
     .from('phone_a_friend_calls')
@@ -422,7 +507,11 @@ export async function initiateCall({
       payment_status: 'paid',
       razorpay_order_id: razorpayOrderId,
       razorpay_payment_id: razorpayPaymentId,
-      amount: amount || hostSettings.rate_per_session || 99.0,
+      amount: amount || (Number(hostSettings.rate_per_session || 49.0) * Math.max(1, Math.round(dur / 15))),
+      duration_minutes: dur,
+      ip_address: ip || null,
+      device_fingerprint: deviceFingerprint || null,
+      device_call_count: deviceCallCount,
       agora_channel_name: agoraChannelName,
     })
     .select(`
@@ -437,12 +526,135 @@ export async function initiateCall({
     throw new Error(callError.message);
   }
 
+  // Record Telemetry in public.phone_a_friend_telemetry silently
+  try {
+    await db.from('phone_a_friend_telemetry').insert({
+      call_id: call.id,
+      user_id: resolvedUserId,
+      ip_address: ip || null,
+      device_fingerprint: deviceFingerprint || 'unknown',
+      user_agent: userAgent || null,
+      caller_name: callerName || null,
+      caller_email: callerEmail || null,
+      caller_phone: callerPhone || null,
+      client_metadata: {
+        device_call_count: deviceCallCount,
+        call_ref: callRef,
+        duration_minutes: dur,
+      },
+    });
+  } catch (telemErr) {
+    console.warn('[PhoneAFriendService] Telemetry insert warning:', telemErr);
+  }
+
   // Slot is reserved only upon successful call insertion
   if (slotId) {
     await db
       .from('phone_a_friend_slots')
       .update({ status: 'booked', updated_at: new Date().toISOString() })
       .eq('id', slotId);
+  }
+
+  // Check / Provision Free 1-Month Membership if caller is not an active member
+  if (callerEmail) {
+    try {
+      const normalizedEmail = callerEmail.trim().toLowerCase();
+      const { data: existingSub } = await db
+        .from('user_subscriptions')
+        .select('id, status')
+        .or(`user_id.eq.${resolvedUserId},customer_email.eq.${normalizedEmail}`)
+        .eq('status', 'active')
+        .limit(1)
+        .maybeSingle();
+
+      if (!existingSub) {
+        // Create 1-month membership (unverified until clicked link as requested)
+        const verificationToken = uuidv4();
+        const now = new Date();
+        const currentStart = now.toISOString();
+        const currentEnd = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000).toISOString();
+
+        await db.from('user_subscriptions').insert({
+          user_id: resolvedUserId,
+          customer_name: callerName || 'Community Friend',
+          customer_email: normalizedEmail,
+          customer_phone: callerPhone || null,
+          status: 'active',
+          is_verified: false,
+          verification_token: verificationToken,
+          plan_type: 'monthly',
+          current_period_start: currentStart,
+          current_period_end: currentEnd,
+          notes: {
+            free_trial: true,
+            source: 'phone_a_friend',
+            call_ref: callRef,
+          },
+        });
+
+        // Send membership verification email
+        const appUrl = process.env.NEXT_PUBLIC_APP_URL || 'https://strangermingle.com';
+        const verificationLink = `${appUrl}/verify-membership?token=${verificationToken}`;
+        await sendEmail({
+          to: normalizedEmail,
+          subject: 'Verify Your Stranger Mingle Membership & Activate 1-Month Free Access',
+          html: generateMembershipVerificationHtml(callerName || 'Friend', verificationLink),
+        });
+        console.log(`[PhoneAFriendService] Dispatched membership verification to ${normalizedEmail}`);
+      }
+    } catch (membershipErr) {
+      console.error('[PhoneAFriendService] Membership grant warning:', membershipErr);
+    }
+
+    // Generate & Send PDF Call Ticket via Email
+    try {
+      const pdfBytes = await generatePhoneAFriendTicketPdf({
+        callRef,
+        callerName: callerName || 'Valued Caller',
+        callerEmail: callerEmail,
+        callerPhone: callerPhone,
+        hostName: call.host?.display_name || 'Community Host',
+        callType,
+        durationMinutes: dur,
+        amountPaid: Number(call.amount) || (49 * Math.max(1, Math.round(dur / 15))),
+        scheduledTime: call.scheduled_start_time,
+        createdAt: call.created_at,
+      });
+
+      await sendEmail({
+        to: callerEmail.trim().toLowerCase(),
+        subject: `Your Phone a Friend Call Pass [${callRef}]`,
+        html: `
+          <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; padding: 24px; color: #1f2937; max-width: 600px; margin: auto; border: 1px solid #f3f4f6; border-radius: 16px;">
+            <div style="border-bottom: 2px solid #f43f5e; padding-bottom: 12px; margin-bottom: 20px;">
+              <h1 style="color: #f43f5e; margin: 0; font-size: 22px;">Stranger Mingle</h1>
+              <p style="margin: 4px 0 0 0; color: #6b7280; font-size: 13px;">Phone a Friend - 1-on-1 Confidential Voice Call</p>
+            </div>
+            <p>Hello <strong>${callerName || 'there'}</strong>,</p>
+            <p>Your audio call session has been successfully confirmed. Below are your session details:</p>
+            <table style="width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 14px;">
+              <tr><td style="padding: 8px 0; color: #6b7280;">Call Reference:</td><td style="padding: 8px 0; font-weight: bold; color: #f43f5e;">${callRef}</td></tr>
+              <tr><td style="padding: 8px 0; color: #6b7280;">Assigned Host:</td><td style="padding: 8px 0; font-weight: bold;">${call.host?.display_name || 'Host'}</td></tr>
+              <tr><td style="padding: 8px 0; color: #6b7280;">Session Duration:</td><td style="padding: 8px 0; font-weight: bold;">${dur} Minutes (Auto-Concludes)</td></tr>
+              <tr><td style="padding: 8px 0; color: #6b7280;">Amount Paid:</td><td style="padding: 8px 0; font-weight: bold;">INR ${call.amount}/-</td></tr>
+            </table>
+            <p>📎 We have attached your official <strong>PDF Call Pass</strong> to this email. You can download and keep it for your records.</p>
+            <div style="background-color: #fff1f2; border-left: 4px solid #f43f5e; padding: 12px; border-radius: 8px; margin-top: 20px; font-size: 12px; color: #9f1239;">
+              <strong>Safety Reminder:</strong> 100% Anonymous voice calls. Exchanging personal phone numbers, WhatsApp, or financial details is strictly prohibited. Harassment leads to immediate ban and legal action.
+            </div>
+          </div>
+        `,
+        attachments: [
+          {
+            filename: `ticket-${callRef}.pdf`,
+            content: Buffer.from(pdfBytes),
+          },
+        ],
+      });
+      console.log(`[PhoneAFriendService] Emailed PDF ticket to ${callerEmail}`);
+    } catch (ticketMailErr) {
+      console.error('[PhoneAFriendService] Ticket mailing warning:', ticketMailErr);
+    }
   }
 
   // Generate Agora token for User (using resolved user id as account)
