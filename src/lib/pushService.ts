@@ -1,14 +1,18 @@
 import webpush from 'web-push';
 import { createAdminClient } from './supabaseClient';
 
-const VAPID_PUBLIC_KEY = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY || 'BChxwzPSfiV0a-BbjUvVsltvjLKblgVNMRTT9eRCIijwYDOXfKBNMdBYqQ46BMuGfHW6YPDahzVNnn5gYQvbGJA';
-const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY || 'ORaGjM9bzqnkFcPwFSQKWywGC_f1CIhA5wodHTHiZ6U';
+const VAPID_PUBLIC_KEY = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY || '';
+const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY || '';
 const VAPID_SUBJECT = process.env.VAPID_SUBJECT || 'mailto:strangermingleteam@gmail.com.com';
 
-try {
-  webpush.setVapidDetails(VAPID_SUBJECT, VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY);
-} catch (err) {
-  console.warn('[PushService] VAPID details initialization warning:', err);
+if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
+  try {
+    webpush.setVapidDetails(VAPID_SUBJECT, VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY);
+  } catch (err) {
+    console.warn('[PushService] VAPID details initialization warning:', err);
+  }
+} else {
+  console.warn('[PushService] VAPID keys missing in environment variables');
 }
 
 export interface CallPushPayload {
