@@ -14,6 +14,7 @@ export interface UserRecord {
     phone?: string | null;
     role?: 'member' | 'admin' | 'guest';
     avatar_url?: string | null;
+    credits?: number | null;
     created_at?: string;
     updated_at?: string;
 }
@@ -220,18 +221,33 @@ export async function findOrCreateUserByContact(data: {
         return null;
     }
 
-    // 1. Try to find existing
-    const query = supabase.from('users').select('id');
-    const conditions = [];
-    if (email) conditions.push(`email.eq.${email}`);
-    if (phone) conditions.push(`phone.eq.${phone}`);
-    
-    const { data: existing } = await query.or(conditions.join(',')).maybeSingle();
-    if (existing) {
-        return existing.id;
+    // 1. Try to find existing by email first
+    const { data: userByEmail } = await supabase
+        .from('users')
+        .select('id')
+        .eq('email', email)
+        .limit(1)
+        .maybeSingle();
+
+    if (userByEmail) {
+        return userByEmail.id;
     }
 
-    // 2. Create new skeleton record (retry on rare alias/username collision)
+    // 2. Secondary fallback: check by phone if provided
+    if (phone) {
+        const { data: userByPhone } = await supabase
+            .from('users')
+            .select('id')
+            .eq('phone', phone)
+            .limit(1)
+            .maybeSingle();
+
+        if (userByPhone) {
+            return userByPhone.id;
+        }
+    }
+
+    // 3. Create new skeleton record (retry on rare alias/username collision)
     console.log(`[UserService] Creating skeleton record for new customer: ${email}`);
     const baseUsername = (name || email.split('@')[0]).slice(0, 50);
 

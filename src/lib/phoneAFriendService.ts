@@ -458,22 +458,11 @@ export async function initiateCall({
     throw new Error('This host is currently not available for calls.');
   }
 
-  if (callType === 'instant' && !hostSettings.is_online) {
-    throw new Error('This host just went offline. Please book a scheduled slot or choose another host.');
-  }
-
-  // If slotId provided, verify it is still available before inserting
-  if (slotId) {
-    const { data: slot } = await db
-      .from('phone_a_friend_slots')
-      .select('status')
-      .eq('id', slotId)
-      .single();
-
-    if (slot?.status !== 'available') {
-      throw new Error('This slot is no longer available.');
-    }
-  }
+  // If instant call, check if host is currently online.
+  // Note: We do NOT throw here if offline, because payment was already verified; we record the call and award credits.
+  const isHostOnline = !!hostSettings?.is_online;
+  const callStatus = callType === 'instant' ? (isHostOnline ? 'ringing' : 'unanswered') : 'pending';
+  const dur = Number(durationMinutes) || 15;
 
   // Check how many times this physical device has called us across any email/phone
   let deviceCallCount = 1;
@@ -492,8 +481,8 @@ export async function initiateCall({
   // Unique call reference & agora channel name
   const callRef = `PAF-${Date.now().toString().slice(-6)}-${Math.random().toString(36).substring(2, 6).toUpperCase()}`;
   const agoraChannelName = `paf_${uuidv4().replace(/-/g, '').slice(0, 16)}`;
-  const callStatus = callType === 'instant' ? 'ringing' : 'pending';
-  const dur = Number(durationMinutes) || 15;
+
+  const finalAmount = amount || (Number(hostSettings?.rate_per_session || 49.0) * Math.max(1, Math.round(dur / 15)));
 
   const { data: call, error: callError } = await db
     .from('phone_a_friend_calls')
@@ -507,7 +496,7 @@ export async function initiateCall({
       payment_status: 'paid',
       razorpay_order_id: razorpayOrderId,
       razorpay_payment_id: razorpayPaymentId,
-      amount: amount || (Number(hostSettings.rate_per_session || 49.0) * Math.max(1, Math.round(dur / 15))),
+      amount: finalAmount,
       duration_minutes: dur,
       ip_address: ip || null,
       device_fingerprint: deviceFingerprint || null,
@@ -526,6 +515,31 @@ export async function initiateCall({
     throw new Error(callError.message);
   }
 
+  // 1. Credit Conversion: 1 INR = 10 credits
+  const creditsEarned = Math.round(Number(finalAmount) * 10);
+  if (resolvedUserId && creditsEarned > 0) {
+    try {
+      const { data: userRow } = await db
+        .from('users')
+        .select('credits')
+        .eq('id', resolvedUserId)
+        .maybeSingle();
+
+      const newCredits = (userRow?.credits || 0) + creditsEarned;
+      await db
+        .from('users')
+        .update({
+          credits: newCredits,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', resolvedUserId);
+
+      console.log(`[PhoneAFriendService] Credited ${creditsEarned} credits to user ${resolvedUserId}. New total: ${newCredits}`);
+    } catch (creditErr) {
+      console.error('[PhoneAFriendService] Credit award error:', creditErr);
+    }
+  }
+
   // Record Telemetry in public.phone_a_friend_telemetry silently
   try {
     await db.from('phone_a_friend_telemetry').insert({
@@ -541,6 +555,7 @@ export async function initiateCall({
         device_call_count: deviceCallCount,
         call_ref: callRef,
         duration_minutes: dur,
+        credits_awarded: creditsEarned,
       },
     });
   } catch (telemErr) {
@@ -555,21 +570,28 @@ export async function initiateCall({
       .eq('id', slotId);
   }
 
-  // Check / Provision Free 1-Month Membership if caller is not an active member
+  // Check / Provision Membership & Dispatch Custom Email
   if (callerEmail) {
+    const normalizedEmail = callerEmail.trim().toLowerCase();
+    const appUrl = process.env.NEXT_PUBLIC_APP_URL || 'https://strangermingle.com';
+
+    let isExistingMember = false;
+    let verificationToken: string | null = null;
+
     try {
-      const normalizedEmail = callerEmail.trim().toLowerCase();
       const { data: existingSub } = await db
         .from('user_subscriptions')
-        .select('id, status')
+        .select('id, status, is_verified')
         .or(`user_id.eq.${resolvedUserId},customer_email.eq.${normalizedEmail}`)
         .eq('status', 'active')
         .limit(1)
         .maybeSingle();
 
-      if (!existingSub) {
-        // Create 1-month membership (unverified until clicked link as requested)
-        const verificationToken = uuidv4();
+      if (existingSub) {
+        isExistingMember = true;
+      } else {
+        // Create 1-month membership with 1-month trial
+        verificationToken = uuidv4();
         const now = new Date();
         const currentStart = now.toISOString();
         const currentEnd = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000).toISOString();
@@ -589,24 +611,16 @@ export async function initiateCall({
             free_trial: true,
             source: 'phone_a_friend',
             call_ref: callRef,
+            credits_awarded: creditsEarned,
           },
         });
-
-        // Send membership verification email
-        const appUrl = process.env.NEXT_PUBLIC_APP_URL || 'https://strangermingle.com';
-        const verificationLink = `${appUrl}/verify-membership?token=${verificationToken}`;
-        await sendEmail({
-          to: normalizedEmail,
-          subject: 'Verify Your Stranger Mingle Membership & Activate 1-Month Free Access',
-          html: generateMembershipVerificationHtml(callerName || 'Friend', verificationLink),
-        });
-        console.log(`[PhoneAFriendService] Dispatched membership verification to ${normalizedEmail}`);
+        console.log(`[PhoneAFriendService] Created 1-month trial subscription for ${normalizedEmail}`);
       }
     } catch (membershipErr) {
-      console.error('[PhoneAFriendService] Membership grant warning:', membershipErr);
+      console.error('[PhoneAFriendService] Membership check/grant error:', membershipErr);
     }
 
-    // Generate & Send PDF Call Ticket via Email
+    // Generate & Send PDF Call Ticket + Tailored Email
     try {
       const pdfBytes = await generatePhoneAFriendTicketPdf({
         callRef,
@@ -616,31 +630,66 @@ export async function initiateCall({
         hostName: call.host?.display_name || 'Community Host',
         callType,
         durationMinutes: dur,
-        amountPaid: Number(call.amount) || (49 * Math.max(1, Math.round(dur / 15))),
+        amountPaid: Number(call.amount) || finalAmount,
         scheduledTime: call.scheduled_start_time,
         createdAt: call.created_at,
       });
 
+      const dashboardLink = `${appUrl}/members`;
+      const verificationLink = verificationToken ? `${appUrl}/verify-membership?token=${verificationToken}` : dashboardLink;
+
+      const emailSubject = isExistingMember
+        ? `Payment Confirmed: Your Call Pass [${callRef}] & ${creditsEarned} Credits Added`
+        : `Payment Confirmed [${callRef}] + Activate Your 1-Month Free Membership (${creditsEarned} Credits)`;
+
+      const ctaButtonHtml = isExistingMember
+        ? `
+          <div style="text-align: center; margin: 28px 0;">
+            <a href="${dashboardLink}" style="background: linear-gradient(135deg, #2563eb, #1d4ed8); color: #ffffff; text-decoration: none; padding: 14px 28px; border-radius: 12px; font-weight: bold; font-size: 15px; display: inline-block; box-shadow: 0 4px 12px rgba(37, 99, 235, 0.25);">
+              Open Member Dashboard →
+            </a>
+            <p style="font-size: 12px; color: #6b7280; margin-top: 8px;">View your active membership status and credit balance.</p>
+          </div>
+        `
+        : `
+          <div style="background-color: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 16px; padding: 20px; margin: 24px 0; text-align: center;">
+            <div style="font-size: 16px; font-weight: 700; color: #166534; margin-bottom: 6px;">🎁 Bonus: 1-Month Free Premium Membership!</div>
+            <p style="font-size: 13px; color: #15803d; margin: 0 0 16px 0;">
+              Because you called a friend, you have unlocked 1 month of complimentary access to Stranger Mingle along with <strong>${creditsEarned} credits</strong>.
+            </p>
+            <a href="${verificationLink}" style="background: linear-gradient(135deg, #16a34a, #15803d); color: #ffffff; text-decoration: none; padding: 14px 28px; border-radius: 12px; font-weight: bold; font-size: 15px; display: inline-block; box-shadow: 0 4px 12px rgba(22, 163, 74, 0.25);">
+              Verify Email & Activate Free Month →
+            </a>
+          </div>
+        `;
+
       await sendEmail({
-        to: callerEmail.trim().toLowerCase(),
-        subject: `Your Phone a Friend Call Pass [${callRef}]`,
+        to: normalizedEmail,
+        subject: emailSubject,
         html: `
-          <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; padding: 24px; color: #1f2937; max-width: 600px; margin: auto; border: 1px solid #f3f4f6; border-radius: 16px;">
+          <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; padding: 24px; color: #1f2937; max-width: 600px; margin: auto; border: 1px solid #f3f4f6; border-radius: 16px; background-color: #ffffff;">
             <div style="border-bottom: 2px solid #f43f5e; padding-bottom: 12px; margin-bottom: 20px;">
               <h1 style="color: #f43f5e; margin: 0; font-size: 22px;">Stranger Mingle</h1>
               <p style="margin: 4px 0 0 0; color: #6b7280; font-size: 13px;">Phone a Friend - 1-on-1 Confidential Voice Call</p>
             </div>
-            <p>Hello <strong>${callerName || 'there'}</strong>,</p>
-            <p>Your audio call session has been successfully confirmed. Below are your session details:</p>
-            <table style="width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 14px;">
-              <tr><td style="padding: 8px 0; color: #6b7280;">Call Reference:</td><td style="padding: 8px 0; font-weight: bold; color: #f43f5e;">${callRef}</td></tr>
-              <tr><td style="padding: 8px 0; color: #6b7280;">Assigned Host:</td><td style="padding: 8px 0; font-weight: bold;">${call.host?.display_name || 'Host'}</td></tr>
-              <tr><td style="padding: 8px 0; color: #6b7280;">Session Duration:</td><td style="padding: 8px 0; font-weight: bold;">${dur} Minutes (Auto-Concludes)</td></tr>
-              <tr><td style="padding: 8px 0; color: #6b7280;">Amount Paid:</td><td style="padding: 8px 0; font-weight: bold;">INR ${call.amount}/-</td></tr>
+            <p style="font-size: 15px; line-height: 1.5;">Hello <strong>${callerName || 'Friend'}</strong>,</p>
+            <p style="font-size: 14px; line-height: 1.5; color: #4b5563;">
+              Your payment of <strong>INR ${call.amount}/-</strong> has been confirmed. We have credited <strong>🪙 ${creditsEarned} Credits</strong> (1 INR = 10 Credits) to your account.
+            </p>
+
+            <table style="width: 100%; border-collapse: collapse; margin: 20px 0; font-size: 14px; background: #f9fafb; border-radius: 12px; overflow: hidden;">
+              <tr><td style="padding: 10px 14px; color: #6b7280; border-bottom: 1px solid #e5e7eb;">Call Reference:</td><td style="padding: 10px 14px; font-weight: bold; color: #f43f5e; border-bottom: 1px solid #e5e7eb;">${callRef}</td></tr>
+              <tr><td style="padding: 10px 14px; color: #6b7280; border-bottom: 1px solid #e5e7eb;">Assigned Host:</td><td style="padding: 10px 14px; font-weight: bold; border-bottom: 1px solid #e5e7eb;">${call.host?.display_name || 'Host'}</td></tr>
+              <tr><td style="padding: 10px 14px; color: #6b7280; border-bottom: 1px solid #e5e7eb;">Session Duration:</td><td style="padding: 10px 14px; font-weight: bold; border-bottom: 1px solid #e5e7eb;">${dur} Minutes</td></tr>
+              <tr><td style="padding: 10px 14px; color: #6b7280; border-bottom: 1px solid #e5e7eb;">Credits Added:</td><td style="padding: 10px 14px; font-weight: bold; color: #059669; border-bottom: 1px solid #e5e7eb;">+${creditsEarned} Credits</td></tr>
+              <tr><td style="padding: 10px 14px; color: #6b7280;">Amount Paid:</td><td style="padding: 10px 14px; font-weight: bold;">INR ${call.amount}/-</td></tr>
             </table>
-            <p>📎 We have attached your official <strong>PDF Call Pass</strong> to this email. You can download and keep it for your records.</p>
+
+            ${ctaButtonHtml}
+
+            <p style="font-size: 13px; color: #6b7280;">📎 Your official <strong>PDF Call Pass</strong> is attached to this email for your records.</p>
             <div style="background-color: #fff1f2; border-left: 4px solid #f43f5e; padding: 12px; border-radius: 8px; margin-top: 20px; font-size: 12px; color: #9f1239;">
-              <strong>Safety Reminder:</strong> 100% Anonymous voice calls. Exchanging personal phone numbers, WhatsApp, or financial details is strictly prohibited. Harassment leads to immediate ban and legal action.
+              <strong>Safety Reminder:</strong> 100% Anonymous voice calls. Exchanging personal phone numbers, WhatsApp, or financial details is strictly prohibited.
             </div>
           </div>
         `,
@@ -651,7 +700,7 @@ export async function initiateCall({
           },
         ],
       });
-      console.log(`[PhoneAFriendService] Emailed PDF ticket to ${callerEmail}`);
+      console.log(`[PhoneAFriendService] Dispatched confirmation email to ${normalizedEmail}`);
     } catch (ticketMailErr) {
       console.error('[PhoneAFriendService] Ticket mailing warning:', ticketMailErr);
     }
@@ -924,6 +973,94 @@ export async function submitCallRating({
   }
 
   return { success: true };
+}
+
+/**
+ * Host submits rating and private notes for the caller.
+ * Note: Never exposed to the caller. Only visible to hosts on incoming calls / host dashboard.
+ */
+export async function submitHostCallerReview({
+  callId,
+  hostId,
+  rating,
+  notes,
+}: {
+  callId: string;
+  hostId: string;
+  rating: number;
+  notes?: string;
+}) {
+  const db = getDb();
+  const safeRating = Math.max(1, Math.min(5, Math.round(Number(rating) || 5)));
+
+  const { data: updatedCall, error } = await db
+    .from('phone_a_friend_calls')
+    .update({
+      host_caller_rating: safeRating,
+      host_notes: notes?.trim() || null,
+      updated_at: new Date().toISOString(),
+    })
+    .eq('id', callId)
+    .eq('host_id', hostId)
+    .select('id, host_caller_rating, host_notes')
+    .single();
+
+  if (error || !updatedCall) {
+    console.error('[PhoneAFriendService] Error submitting caller review by host:', error);
+    throw new Error('Failed to record host review for caller.');
+  }
+
+  return { success: true, call: updatedCall };
+}
+
+/**
+ * Fetch caller's historical reputation for the host (average rating and previous notes).
+ * Strictly used by host incoming alert and host interfaces.
+ */
+export async function getCallerReputationForHost(callerUserId: string) {
+  const db = getDb();
+  const resolvedUserId = resolveCallerUuid(callerUserId);
+
+  const { data: calls, error } = await db
+    .from('phone_a_friend_calls')
+    .select('id, host_caller_rating, host_notes, created_at')
+    .eq('user_id', resolvedUserId);
+
+  if (error || !calls || calls.length === 0) {
+    return {
+      totalCalls: 0,
+      averageRating: null,
+      ratingCount: 0,
+      recentNotes: [],
+    };
+  }
+
+  const ratedCalls = calls.filter(
+    (c) => typeof c.host_caller_rating === 'number' && c.host_caller_rating > 0
+  );
+  const totalCalls = calls.length;
+  const ratingCount = ratedCalls.length;
+  const averageRating =
+    ratingCount > 0
+      ? Number(
+          (
+            ratedCalls.reduce((acc, c) => acc + c.host_caller_rating!, 0) / ratingCount
+          ).toFixed(1)
+        )
+      : null;
+
+  const recentNotes = calls
+    .filter((c) => c.host_notes && c.host_notes.trim().length > 0)
+    .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+    .slice(0, 3)
+    .map((c) => c.host_notes!.trim());
+
+  return {
+    totalCalls,
+    averageRating,
+    ratingCount,
+    recentNotes,
+  };
 }
 
 /**

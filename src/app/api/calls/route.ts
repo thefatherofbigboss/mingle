@@ -6,7 +6,9 @@ import {
   initiateCall, 
   respondToCall, 
   endCallSession, 
-  submitCallRating 
+  submitCallRating,
+  submitHostCallerReview,
+  getCallerReputationForHost
 } from '@/lib/phoneAFriendService';
 
 function corsHeaders(req: NextRequest) {
@@ -27,13 +29,20 @@ export async function OPTIONS(req: NextRequest) {
 }
 
 /**
- * GET /api/calls: List approved calling hosts or a specific host's details.
+ * GET /api/calls: List approved calling hosts, specific host details, or caller reputation for hosts.
  */
 export async function GET(req: NextRequest) {
   const headers = corsHeaders(req);
   try {
     const { searchParams } = new URL(req.url);
     const hostId = searchParams.get('hostId');
+    const callerUserId = searchParams.get('callerUserId');
+    const forHost = searchParams.get('forHost');
+
+    if (callerUserId && (forHost === 'true' || hostId)) {
+      const reputation = await getCallerReputationForHost(callerUserId);
+      return NextResponse.json(reputation, { headers });
+    }
 
     if (hostId) {
       const details = await getHostCallingDetails(hostId);
@@ -89,6 +98,11 @@ export async function POST(req: NextRequest) {
 
     if (action === 'rate') {
       const result = await submitCallRating(payload);
+      return NextResponse.json(result, { headers });
+    }
+
+    if (action === 'host-rate-caller') {
+      const result = await submitHostCallerReview(payload);
       return NextResponse.json(result, { headers });
     }
 

@@ -65,7 +65,33 @@ export async function POST(request: NextRequest) {
                         return NextResponse.json({ status: 'success', message: 'Subscription activated via order webhook' });
                     }
 
-                    return NextResponse.json({ status: 'ignored', message: 'Order not found in bookings or subscriptions' });
+                    // Check if order belongs to Phone a Friend
+                    const notes = order?.entity?.notes || payment?.entity?.notes || {};
+                    const isPhoneAFriend = notes.call_type || notes.type === 'phone_a_friend' || notes.service === 'phone_a_friend' || notes.host_id;
+
+                    if (isPhoneAFriend) {
+                        console.log(`[Webhook] Reconciling Phone-a-Friend order ${razorpayOrderId}`);
+                        const email = payment.entity?.email || notes.caller_email || notes.email;
+                        const phone = payment.entity?.contact || notes.caller_phone || notes.phone;
+                        const name = notes.caller_name || notes.name;
+                        const amountInr = (payment.entity?.amount || order.entity?.amount || 0) / 100;
+                        const creditsToAdd = Math.round(amountInr * 10);
+
+                        if (email && creditsToAdd > 0) {
+                            const { findOrCreateUserByContact } = await import('@/lib/userProfile');
+                            const userId = await findOrCreateUserByContact({ email, phone, name });
+                            if (userId) {
+                                const supabase = createAdminClient();
+                                const { data: u } = await supabase.from('users').select('credits').eq('id', userId).maybeSingle();
+                                const newCredits = (u?.credits || 0) + creditsToAdd;
+                                await supabase.from('users').update({ credits: newCredits, updated_at: new Date().toISOString() }).eq('id', userId);
+                                console.log(`[Webhook] Awarded ${creditsToAdd} credits to user ${userId} (${email}) for Phone-a-Friend.`);
+                                return NextResponse.json({ status: 'success', message: 'Phone a friend credits awarded via webhook' });
+                            }
+                        }
+                    }
+
+                    return NextResponse.json({ status: 'ignored', message: 'Order not found in bookings, subscriptions, or calls' });
                 }
                 console.error('Payment processing failed in webhook:', result.error);
                 return NextResponse.json({ error: result.error || 'Failed to process payment' }, { status: 500 });

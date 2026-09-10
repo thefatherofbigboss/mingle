@@ -207,11 +207,36 @@ export async function GET(req: NextRequest) {
                 }
             }
 
+            // Fetch user credits from users table
+            let userCredits = 0;
+            const targetUserId = subscription.user_id || mappedUserId;
+            if (targetUserId) {
+                const { data: userProfile } = await supabase
+                    .from('users')
+                    .select('credits')
+                    .eq('id', targetUserId)
+                    .maybeSingle();
+                if (userProfile && typeof userProfile.credits === 'number') {
+                    userCredits = userProfile.credits;
+                }
+            } else if (email) {
+                const { data: userByEmail } = await supabase
+                    .from('users')
+                    .select('credits')
+                    .eq('email', email)
+                    .limit(1)
+                    .maybeSingle();
+                if (userByEmail && typeof userByEmail.credits === 'number') {
+                    userCredits = userByEmail.credits;
+                }
+            }
+
             // If the subscription is no longer active after sync, treat as not a member
             if (subscription.status !== 'active') {
                 return NextResponse.json({ 
                     success: true, 
-                    isMember: false 
+                    isMember: false,
+                    credits: userCredits
                 });
             }
 
@@ -221,10 +246,10 @@ export async function GET(req: NextRequest) {
                     success: true, 
                     isMember: false,
                     isExpired: true,
-                    expiry: expiryDate
+                    expiry: expiryDate,
+                    credits: userCredits
                 });
             }
-            // ----------------------------------------------------------------
 
             return NextResponse.json({ 
                 success: true, 
@@ -233,13 +258,38 @@ export async function GET(req: NextRequest) {
                 plan: subscription.razorpay_plan_id,
                 is_verified: subscription.is_verified,
                 expiry: expiryDate,
-                cancel_at_period_end: !!subscription.cancel_at_period_end
+                cancel_at_period_end: !!subscription.cancel_at_period_end,
+                credits: userCredits
             });
+        }
+
+        // Non-member fallback: fetch credits if mapped user exists
+        let nonMemberCredits = 0;
+        if (mappedUserId) {
+            const { data: userProfile } = await supabase
+                .from('users')
+                .select('credits')
+                .eq('id', mappedUserId)
+                .maybeSingle();
+            if (userProfile && typeof userProfile.credits === 'number') {
+                nonMemberCredits = userProfile.credits;
+            }
+        } else if (email) {
+            const { data: userByEmail } = await supabase
+                .from('users')
+                .select('credits')
+                .eq('email', email)
+                .limit(1)
+                .maybeSingle();
+            if (userByEmail && typeof userByEmail.credits === 'number') {
+                nonMemberCredits = userByEmail.credits;
+            }
         }
 
         return NextResponse.json({ 
             success: true, 
-            isMember: false 
+            isMember: false,
+            credits: nonMemberCredits
         });
 
     } catch (error: any) {
