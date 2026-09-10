@@ -6,6 +6,8 @@ import {
   initiateCall, 
   respondToCall, 
   endCallSession, 
+  cancelCallSession,
+  getActiveIncomingCallForHost,
   submitCallRating,
   submitHostCallerReview,
   getCallerReputationForHost
@@ -42,6 +44,11 @@ export async function GET(req: NextRequest) {
     if (callerUserId && (forHost === 'true' || hostId)) {
       const reputation = await getCallerReputationForHost(callerUserId);
       return NextResponse.json(reputation, { headers });
+    }
+
+    if (hostId && searchParams.get('activeOnly') === 'true') {
+      const activeCall = await getActiveIncomingCallForHost(hostId);
+      return NextResponse.json({ call: activeCall }, { headers });
     }
 
     if (hostId) {
@@ -93,6 +100,11 @@ export async function POST(req: NextRequest) {
 
     if (action === 'end') {
       const result = await endCallSession(payload);
+      return NextResponse.json(result, { headers });
+    }
+
+    if (action === 'cancel') {
+      const result = await cancelCallSession(enrichedPayload);
       return NextResponse.json(result, { headers });
     }
 

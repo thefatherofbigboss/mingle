@@ -835,6 +835,10 @@ export async function respondToCall({
       .single();
 
     if (updateError) throw new Error(updateError.message);
+
+    // Automatically refund user credits if this was paid with credits
+    await refundCallCredits(callId, 'Host rejected call');
+
     return { success: true, call: updated };
   }
 
@@ -988,6 +992,119 @@ export async function endCallSession({
   }
 
   return { success: true, call: updatedCall };
+}
+
+/**
+ * Automatically refunds credits to a user if their call was not accepted, was rejected, or cancelled.
+ */
+export async function refundCallCredits(callId: string, reason: string = 'Call not accepted') {
+  const db = getDb();
+  const { data: call } = await db
+    .from('phone_a_friend_calls')
+    .select('id, user_id, amount, razorpay_order_id, payment_status')
+    .eq('id', callId)
+    .single();
+
+  if (!call || call.payment_status === 'refunded') return;
+
+  const isCreditsPayment = call.razorpay_order_id === 'CREDITS' || (call as any).payment_method === 'credits';
+  if (isCreditsPayment && call.user_id) {
+    const creditsToRefund = Math.round(Number(call.amount || 0) * 10);
+    if (creditsToRefund > 0) {
+      const { data: userRow } = await db
+        .from('users')
+        .select('credits')
+        .eq('id', call.user_id)
+        .maybeSingle();
+
+      const newCredits = (userRow?.credits || 0) + creditsToRefund;
+      await db
+        .from('users')
+        .update({
+          credits: newCredits,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', call.user_id);
+
+      await db
+        .from('phone_a_friend_calls')
+        .update({
+          payment_status: 'refunded',
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', callId);
+
+      console.log(`[PhoneAFriendService] Refunded ${creditsToRefund} credits to user ${call.user_id}. Reason: ${reason}. New balance: ${newCredits}`);
+    }
+  }
+}
+
+/**
+ * Cancels an outgoing call and immediately refunds user credits.
+ */
+export async function cancelCallSession({
+  callId,
+  requesterId,
+  reason = 'Cancelled by user',
+}: {
+  callId: string;
+  requesterId?: string;
+  reason?: string;
+}) {
+  const db = getDb();
+  const { data: call, error } = await db
+    .from('phone_a_friend_calls')
+    .select('*')
+    .eq('id', callId)
+    .single();
+
+  if (error || !call) {
+    return { success: false, error: 'Call session not found.' };
+  }
+
+  if (call.status === 'completed' || call.status === 'rejected') {
+    return { success: true, call };
+  }
+
+  const { data: updated, error: updateError } = await db
+    .from('phone_a_friend_calls')
+    .update({
+      status: 'cancelled',
+      updated_at: new Date().toISOString(),
+    })
+    .eq('id', callId)
+    .select()
+    .single();
+
+  if (updateError) throw new Error(updateError.message);
+
+  // Automatically refund user credits
+  await refundCallCredits(callId, reason);
+
+  return { success: true, call: updated };
+}
+
+/**
+ * Retrieves the currently active ringing call for a host (if created within the last 60 seconds).
+ */
+export async function getActiveIncomingCallForHost(hostId: string) {
+  const db = getDb();
+  const oneMinuteAgo = new Date(Date.now() - 60000).toISOString();
+
+  const { data: calls, error } = await db
+    .from('phone_a_friend_calls')
+    .select(`
+      *,
+      user:users!user_id(id, username, anonymous_alias, avatar_url)
+    `)
+    .eq('host_id', hostId)
+    .eq('status', 'ringing')
+    .gte('created_at', oneMinuteAgo)
+    .order('created_at', { ascending: false })
+    .limit(1);
+
+  if (error || !calls || calls.length === 0) return null;
+  return calls[0];
 }
 
 /**
