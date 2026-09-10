@@ -3,7 +3,7 @@ import { createAdminClient } from './supabaseClient';
 
 const VAPID_PUBLIC_KEY = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY || 'BChxwzPSfiV0a-BbjUvVsltvjLKblgVNMRTT9eRCIijwYDOXfKBNMdBYqQ46BMuGfHW6YPDahzVNnn5gYQvbGJA';
 const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY || 'ORaGjM9bzqnkFcPwFSQKWywGC_f1CIhA5wodHTHiZ6U';
-const VAPID_SUBJECT = process.env.VAPID_SUBJECT || 'mailto:admin@strangermingle.com';
+const VAPID_SUBJECT = process.env.VAPID_SUBJECT || 'mailto:strangermingleteam@gmail.com.com';
 
 try {
   webpush.setVapidDetails(VAPID_SUBJECT, VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY);
