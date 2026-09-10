@@ -400,6 +400,7 @@ export async function initiateCall({
   razorpayOrderId,
   razorpayPaymentId,
   razorpaySignature,
+  paymentMethod = 'razorpay',
 }: {
   userId: string;
   hostId: string;
@@ -416,20 +417,11 @@ export async function initiateCall({
   razorpayOrderId?: string;
   razorpayPaymentId?: string;
   razorpaySignature?: string;
+  paymentMethod?: 'razorpay' | 'credits';
 }) {
   const db = getDb();
 
-  // Enforce mandatory payment verification
-  if (!razorpayOrderId || !razorpayPaymentId || !razorpaySignature) {
-    throw new Error('Payment required. Please complete payment before starting a call or booking a slot.');
-  }
-
-  const isPaymentValid = verifyRazorpaySignature(razorpayOrderId, razorpayPaymentId, razorpaySignature);
-  if (!isPaymentValid) {
-    throw new Error('Payment signature verification failed.');
-  }
-
-  // Provision / link user in public.users
+  // Provision / link user in public.users first so we can verify credits or link payment
   let resolvedUserId = resolveCallerUuid(userId);
   if (callerEmail) {
     try {
@@ -458,11 +450,56 @@ export async function initiateCall({
     throw new Error('This host is currently not available for calls.');
   }
 
+  const dur = Number(durationMinutes) || 15;
+  const finalAmount = amount || (Number(hostSettings?.rate_per_session || 49.0) * Math.max(1, Math.round(dur / 15)));
+  const creditsNeeded = Math.round(Number(finalAmount) * 10);
+
+  let effectiveOrderId = razorpayOrderId;
+  let effectivePaymentId = razorpayPaymentId;
+
+  if (paymentMethod === 'credits') {
+    // Validate user's available credits
+    const { data: userRow } = await db
+      .from('users')
+      .select('credits')
+      .eq('id', resolvedUserId)
+      .maybeSingle();
+
+    const currentCredits = userRow?.credits || 0;
+    if (currentCredits < creditsNeeded) {
+      throw new Error(`Insufficient credits. This session requires ${creditsNeeded} credits, but you currently have ${currentCredits} credits.`);
+    }
+
+    // Deduct credits from user
+    const remainingCredits = currentCredits - creditsNeeded;
+    await db
+      .from('users')
+      .update({
+        credits: remainingCredits,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', resolvedUserId);
+
+    console.log(`[PhoneAFriendService] Deducted ${creditsNeeded} credits from user ${resolvedUserId}. Remaining: ${remainingCredits}`);
+
+    effectiveOrderId = razorpayOrderId || 'CREDITS';
+    effectivePaymentId = razorpayPaymentId || `CREDITS_${Date.now()}`;
+  } else {
+    // Enforce mandatory Razorpay payment verification
+    if (!razorpayOrderId || !razorpayPaymentId || !razorpaySignature) {
+      throw new Error('Payment required. Please complete payment before starting a call or booking a slot.');
+    }
+
+    const isPaymentValid = verifyRazorpaySignature(razorpayOrderId, razorpayPaymentId, razorpaySignature);
+    if (!isPaymentValid) {
+      throw new Error('Payment signature verification failed.');
+    }
+  }
+
   // If instant call, check if host is currently online.
   // Note: We do NOT throw here if offline, because payment was already verified; we record the call and award credits.
   const isHostOnline = !!hostSettings?.is_online;
   const callStatus = callType === 'instant' ? (isHostOnline ? 'ringing' : 'unanswered') : 'pending';
-  const dur = Number(durationMinutes) || 15;
 
   // Check how many times this physical device has called us across any email/phone
   let deviceCallCount = 1;
@@ -482,8 +519,6 @@ export async function initiateCall({
   const callRef = `PAF-${Date.now().toString().slice(-6)}-${Math.random().toString(36).substring(2, 6).toUpperCase()}`;
   const agoraChannelName = `paf_${uuidv4().replace(/-/g, '').slice(0, 16)}`;
 
-  const finalAmount = amount || (Number(hostSettings?.rate_per_session || 49.0) * Math.max(1, Math.round(dur / 15)));
-
   const { data: call, error: callError } = await db
     .from('phone_a_friend_calls')
     .insert({
@@ -494,8 +529,8 @@ export async function initiateCall({
       call_type: callType,
       status: callStatus,
       payment_status: 'paid',
-      razorpay_order_id: razorpayOrderId,
-      razorpay_payment_id: razorpayPaymentId,
+      razorpay_order_id: effectiveOrderId,
+      razorpay_payment_id: effectivePaymentId,
       amount: finalAmount,
       duration_minutes: dur,
       ip_address: ip || null,
@@ -515,28 +550,48 @@ export async function initiateCall({
     throw new Error(callError.message);
   }
 
-  // 1. Credit Conversion: 1 INR = 10 credits
-  const creditsEarned = Math.round(Number(finalAmount) * 10);
-  if (resolvedUserId && creditsEarned > 0) {
+  // 1. Dispatch high-priority Web Push notification to wake up host mobile device (even if screen is off)
+  if (callStatus === 'ringing') {
     try {
-      const { data: userRow } = await db
-        .from('users')
-        .select('credits')
-        .eq('id', resolvedUserId)
-        .maybeSingle();
+      const { sendCallPushNotification } = await import('./pushService');
+      const callerNameForPush = callerName || call.user?.username || call.user?.anonymous_alias || 'A Member';
+      sendCallPushNotification(hostId, {
+        callId: call.id,
+        callRef: call.call_ref,
+        callerName: callerNameForPush,
+        amount: finalAmount,
+        durationMinutes: dur,
+      }).catch((pushErr) => console.error('[PhoneAFriendService] Background push dispatch error:', pushErr));
+    } catch (importErr) {
+      console.warn('[PhoneAFriendService] Push service import failed:', importErr);
+    }
+  }
 
-      const newCredits = (userRow?.credits || 0) + creditsEarned;
-      await db
-        .from('users')
-        .update({
-          credits: newCredits,
-          updated_at: new Date().toISOString(),
-        })
-        .eq('id', resolvedUserId);
+  // 2. Credit Conversion: 1 INR = 10 credits (Only for direct payments, not credit redemptions)
+  let creditsEarned = 0;
+  if (paymentMethod !== 'credits') {
+    creditsEarned = Math.round(Number(finalAmount) * 10);
+    if (resolvedUserId && creditsEarned > 0) {
+      try {
+        const { data: userRow } = await db
+          .from('users')
+          .select('credits')
+          .eq('id', resolvedUserId)
+          .maybeSingle();
 
-      console.log(`[PhoneAFriendService] Credited ${creditsEarned} credits to user ${resolvedUserId}. New total: ${newCredits}`);
-    } catch (creditErr) {
-      console.error('[PhoneAFriendService] Credit award error:', creditErr);
+        const newCredits = (userRow?.credits || 0) + creditsEarned;
+        await db
+          .from('users')
+          .update({
+            credits: newCredits,
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', resolvedUserId);
+
+        console.log(`[PhoneAFriendService] Credited ${creditsEarned} credits to user ${resolvedUserId}. New total: ${newCredits}`);
+      } catch (creditErr) {
+        console.error('[PhoneAFriendService] Credit award error:', creditErr);
+      }
     }
   }
 
@@ -638,11 +693,15 @@ export async function initiateCall({
       const dashboardLink = `${appUrl}/members`;
       const verificationLink = verificationToken ? `${appUrl}/verify-membership?token=${verificationToken}` : dashboardLink;
 
-      const emailSubject = isExistingMember
-        ? `Payment Confirmed: Your Call Pass [${callRef}] & ${creditsEarned} Credits Added`
-        : `Payment Confirmed [${callRef}] + Activate Your 1-Month Free Membership (${creditsEarned} Credits)`;
+      const isPaidWithCredits = paymentMethod === 'credits';
 
-      const ctaButtonHtml = isExistingMember
+      const emailSubject = isPaidWithCredits
+        ? `Call Pass Confirmed: [${callRef}] (${creditsNeeded} Credits Redeemed)`
+        : isExistingMember
+          ? `Payment Confirmed: Your Call Pass [${callRef}] & ${creditsEarned} Credits Added`
+          : `Payment Confirmed [${callRef}] + Activate Your 1-Month Free Membership (${creditsEarned} Credits)`;
+
+      const ctaButtonHtml = (isExistingMember || isPaidWithCredits)
         ? `
           <div style="text-align: center; margin: 28px 0;">
             <a href="${dashboardLink}" style="background: linear-gradient(135deg, #2563eb, #1d4ed8); color: #ffffff; text-decoration: none; padding: 14px 28px; border-radius: 12px; font-weight: bold; font-size: 15px; display: inline-block; box-shadow: 0 4px 12px rgba(37, 99, 235, 0.25);">
@@ -674,15 +733,24 @@ export async function initiateCall({
             </div>
             <p style="font-size: 15px; line-height: 1.5;">Hello <strong>${callerName || 'Friend'}</strong>,</p>
             <p style="font-size: 14px; line-height: 1.5; color: #4b5563;">
-              Your payment of <strong>INR ${call.amount}/-</strong> has been confirmed. We have credited <strong>🪙 ${creditsEarned} Credits</strong> (1 INR = 10 Credits) to your account.
+              ${
+                isPaidWithCredits
+                  ? `Your call pass has been confirmed using <strong>${creditsNeeded} Membership Credits</strong>.`
+                  : `Your payment of <strong>INR ${call.amount}/-</strong> has been confirmed. We have credited <strong>🪙 ${creditsEarned} Credits</strong> (1 INR = 10 Credits) to your account.`
+              }
             </p>
 
             <table style="width: 100%; border-collapse: collapse; margin: 20px 0; font-size: 14px; background: #f9fafb; border-radius: 12px; overflow: hidden;">
               <tr><td style="padding: 10px 14px; color: #6b7280; border-bottom: 1px solid #e5e7eb;">Call Reference:</td><td style="padding: 10px 14px; font-weight: bold; color: #f43f5e; border-bottom: 1px solid #e5e7eb;">${callRef}</td></tr>
               <tr><td style="padding: 10px 14px; color: #6b7280; border-bottom: 1px solid #e5e7eb;">Assigned Host:</td><td style="padding: 10px 14px; font-weight: bold; border-bottom: 1px solid #e5e7eb;">${call.host?.display_name || 'Host'}</td></tr>
               <tr><td style="padding: 10px 14px; color: #6b7280; border-bottom: 1px solid #e5e7eb;">Session Duration:</td><td style="padding: 10px 14px; font-weight: bold; border-bottom: 1px solid #e5e7eb;">${dur} Minutes</td></tr>
-              <tr><td style="padding: 10px 14px; color: #6b7280; border-bottom: 1px solid #e5e7eb;">Credits Added:</td><td style="padding: 10px 14px; font-weight: bold; color: #059669; border-bottom: 1px solid #e5e7eb;">+${creditsEarned} Credits</td></tr>
-              <tr><td style="padding: 10px 14px; color: #6b7280;">Amount Paid:</td><td style="padding: 10px 14px; font-weight: bold;">INR ${call.amount}/-</td></tr>
+              ${
+                isPaidWithCredits
+                  ? `<tr><td style="padding: 10px 14px; color: #6b7280; border-bottom: 1px solid #e5e7eb;">Credits Redeemed:</td><td style="padding: 10px 14px; font-weight: bold; color: #f43f5e; border-bottom: 1px solid #e5e7eb;">-${creditsNeeded} Credits</td></tr>
+                     <tr><td style="padding: 10px 14px; color: #6b7280;">Payment Method:</td><td style="padding: 10px 14px; font-weight: bold;">Membership Credits</td></tr>`
+                  : `<tr><td style="padding: 10px 14px; color: #6b7280; border-bottom: 1px solid #e5e7eb;">Credits Added:</td><td style="padding: 10px 14px; font-weight: bold; color: #059669; border-bottom: 1px solid #e5e7eb;">+${creditsEarned} Credits</td></tr>
+                     <tr><td style="padding: 10px 14px; color: #6b7280;">Amount Paid:</td><td style="padding: 10px 14px; font-weight: bold;">INR ${call.amount}/-</td></tr>`
+              }
             </table>
 
             ${ctaButtonHtml}
