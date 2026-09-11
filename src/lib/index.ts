@@ -11,3 +11,4 @@ export * from './metaService';
 export * from './chatService';
 export * from './agoraService';
 export * from './phoneAFriendService';
+export * from './memberCallsService';
