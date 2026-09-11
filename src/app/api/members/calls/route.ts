@@ -46,11 +46,7 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ call: activeCall }, { headers });
     }
 
-    if (!currentUserId) {
-      return NextResponse.json({ error: 'currentUserId is required' }, { status: 400, headers });
-    }
-
-    const onlineMembers = await getOnlineMembers(currentUserId);
+    const onlineMembers = await getOnlineMembers(currentUserId || null);
     return NextResponse.json({ members: onlineMembers }, { headers });
   } catch (error: any) {
     console.error('[API/members/calls GET]', error);

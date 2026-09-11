@@ -41,48 +41,62 @@ export function formatGender(genderString: string | null | undefined): string {
  * Fetches all online & available verified members (active within 300 seconds / 5 mins).
  * Excludes the requesting user and any blocked users.
  */
-export async function getOnlineMembers(currentUserId: string) {
+export async function getOnlineMembers(currentUserId?: string | null) {
   const db = getDb();
-  const fiveMinutesAgo = new Date(Date.now() - 300 * 1000).toISOString();
+  // Cutoff for active presence: 15 minutes of heartbeat inactivity
+  const heartbeatCutoff = new Date(Date.now() - 15 * 60 * 1000).toISOString();
 
-  // 1. Fetch available members with active heartbeat
-  const { data: members, error } = await db
+  // 1. Fetch real active members who are actually online & available for calls
+  let query = db
     .from('users')
     .select(`
       id,
       anonymous_alias,
       avatar_url,
+      bio,
       gender,
       date_of_birth,
       call_status,
       member_call_rating_avg,
       member_call_rating_count,
-      last_call_heartbeat
+      last_call_heartbeat,
+      is_call_available,
+      updated_at
     `)
-    .eq('is_call_available', true)
     .eq('is_active', true)
-    .neq('id', currentUserId)
-    .gte('last_call_heartbeat', fiveMinutesAgo)
-    .order('last_call_heartbeat', { ascending: false })
-    .limit(60);
+    .eq('role', 'member')
+    .eq('is_call_available', true)
+    .neq('call_status', 'offline')
+    .or(`last_call_heartbeat.gte.${heartbeatCutoff},last_call_heartbeat.is.null`)
+    .order('last_call_heartbeat', { ascending: false, nullsFirst: false })
+    .order('updated_at', { ascending: false })
+    .limit(30);
+
+  if (currentUserId && currentUserId !== 'public') {
+    query = query.neq('id', currentUserId);
+  }
+
+  const { data: members, error } = await query;
 
   if (error) {
     console.error('[MemberCallsService] Error fetching online members:', error);
     throw new Error(error.message);
   }
 
-  // 2. Fetch blocked users to exclude
+  // 2. Fetch blocked users to exclude if currentUserId is provided
   let blockedUserIds: string[] = [];
-  try {
-    const { data: blocks } = await db
-      .from('user_blocks')
-      .select('blocked_id')
-      .eq('blocker_id', currentUserId);
-    if (blocks) {
-      blockedUserIds = blocks.map((b: any) => b.blocked_id);
+  if (currentUserId && currentUserId !== 'public') {
+    try {
+      const { data: blocks } = await db
+        .from('user_blocks')
+        .select('blocked_id')
+        .eq('blocker_id', currentUserId);
+      if (blocks) {
+        blockedUserIds = blocks.map((b: any) => b.blocked_id);
+      }
+    } catch (err) {
+      console.warn('[MemberCallsService] Blocked check warning:', err);
     }
-  } catch (err) {
-    console.warn('[MemberCallsService] Blocked check warning:', err);
   }
 
   // 3. Format public attributes safely (never expose real name, email, or phone)
@@ -92,9 +106,10 @@ export async function getOnlineMembers(currentUserId: string) {
       id: m.id,
       anonymousAlias: m.anonymous_alias || `Member_${m.id.slice(0, 6)}`,
       avatarUrl: m.avatar_url || null,
+      bio: m.bio || '',
       gender: formatGender(m.gender),
       age: calculateAge(m.date_of_birth),
-      callStatus: m.call_status || 'idle',
+      callStatus: m.is_call_available ? (m.call_status || 'idle') : 'idle',
       ratingAvg: Number(m.member_call_rating_avg || 5.0).toFixed(1),
       ratingCount: m.member_call_rating_count || 0,
     }));
@@ -406,13 +421,20 @@ export async function endMemberCall({
   let creditsToDeduct = 0;
   let finalStatus = 'completed';
 
-  if (startTime) {
+  // Only compute billing and duration if the call was accepted by the other member
+  const wasAccepted = (call.status === 'accepted' || call.status === 'in_call') && !!call.started_at;
+
+  if (wasAccepted && startTime) {
     durationSeconds = Math.max(0, Math.round((now.getTime() - startTime.getTime()) / 1000));
     billedMinutes = Math.max(1, Math.ceil(durationSeconds / 60));
     creditsToDeduct = billedMinutes * 10; // Exactly 10 credits per minute
+    finalStatus = 'completed';
   } else {
-    // Call ended before being accepted
+    // Call ended before being accepted by receiver (ringing state / cancelled / rejected)
     finalStatus = 'cancelled';
+    durationSeconds = 0;
+    billedMinutes = 0;
+    creditsToDeduct = 0;
   }
 
   // 1. Deduct credits from caller (if call was connected)
