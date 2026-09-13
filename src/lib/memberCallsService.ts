@@ -37,8 +37,57 @@ export function formatGender(genderString: string | null | undefined): string {
   return clean.charAt(0).toUpperCase() + clean.slice(1).toLowerCase();
 }
 
+async function resolveCanonicalUserId(db: any, identifier?: string | null): Promise<string | null> {
+  if (!identifier || identifier === 'public') return null;
+
+  // 1. Direct ID check
+  const { data: direct } = await db.from('users').select('id').eq('id', identifier).maybeSingle();
+  if (direct) return direct.id;
+
+  // 2. Lookup by subscription user_id or customer_email
+  const { data: sub } = await db
+    .from('user_subscriptions')
+    .select('user_id')
+    .or(`user_id.eq.${identifier},customer_email.eq.${identifier}`)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (sub?.user_id) return sub.user_id;
+
+  // 3. Lookup by email in users table
+  const { data: byEmail } = await db.from('users').select('id').eq('email', identifier).maybeSingle();
+  if (byEmail) return byEmail.id;
+
+  return identifier;
+}
+
 /**
- * Fetches all online & available verified members (active within 300 seconds / 5 mins).
+ * Retrieves the current member's own calling availability and credit balance.
+ */
+export async function getMemberSelfStatus(userId: string) {
+  const db = getDb();
+  const canonicalId = await resolveCanonicalUserId(db, userId);
+  if (!canonicalId) return null;
+
+  const { data: user } = await db
+    .from('users')
+    .select('id, is_call_available, call_status, credits')
+    .eq('id', canonicalId)
+    .maybeSingle();
+
+  if (!user) return null;
+
+  const rawStatus = user.call_status || 'idle';
+  return {
+    userId: user.id,
+    isCallAvailable: Boolean(user.is_call_available),
+    callStatus: rawStatus === 'online' ? 'idle' : rawStatus,
+    credits: Number(user.credits || 0),
+  };
+}
+
+/**
+ * Fetches all online & available verified members (active within 15 mins).
  * Excludes the requesting user and any blocked users.
  */
 export async function getOnlineMembers(currentUserId?: string | null) {
@@ -46,7 +95,9 @@ export async function getOnlineMembers(currentUserId?: string | null) {
   // Cutoff for active presence: 15 minutes of heartbeat inactivity
   const heartbeatCutoff = new Date(Date.now() - 15 * 60 * 1000).toISOString();
 
-  // 1. Fetch real active members who are actually online & available for calls
+  const canonicalCurrentUserId = await resolveCanonicalUserId(db, currentUserId);
+
+  // 1. Fetch real active members (including verified hosts/admins) who are available for calls
   let query = db
     .from('users')
     .select(`
@@ -64,7 +115,7 @@ export async function getOnlineMembers(currentUserId?: string | null) {
       updated_at
     `)
     .eq('is_active', true)
-    .eq('role', 'member')
+    .in('role', ['member', 'host', 'admin'])
     .eq('is_call_available', true)
     .neq('call_status', 'offline')
     .or(`last_call_heartbeat.gte.${heartbeatCutoff},last_call_heartbeat.is.null`)
@@ -72,8 +123,8 @@ export async function getOnlineMembers(currentUserId?: string | null) {
     .order('updated_at', { ascending: false })
     .limit(30);
 
-  if (currentUserId && currentUserId !== 'public') {
-    query = query.neq('id', currentUserId);
+  if (canonicalCurrentUserId) {
+    query = query.neq('id', canonicalCurrentUserId);
   }
 
   const { data: members, error } = await query;
@@ -83,14 +134,14 @@ export async function getOnlineMembers(currentUserId?: string | null) {
     throw new Error(error.message);
   }
 
-  // 2. Fetch blocked users to exclude if currentUserId is provided
+  // 2. Fetch blocked users to exclude if current user is provided
   let blockedUserIds: string[] = [];
-  if (currentUserId && currentUserId !== 'public') {
+  if (canonicalCurrentUserId) {
     try {
       const { data: blocks } = await db
         .from('user_blocks')
         .select('blocked_id')
-        .eq('blocker_id', currentUserId);
+        .eq('blocker_id', canonicalCurrentUserId);
       if (blocks) {
         blockedUserIds = blocks.map((b: any) => b.blocked_id);
       }
@@ -102,17 +153,21 @@ export async function getOnlineMembers(currentUserId?: string | null) {
   // 3. Format public attributes safely (never expose real name, email, or phone)
   return (members || [])
     .filter((m: any) => !blockedUserIds.includes(m.id))
-    .map((m: any) => ({
-      id: m.id,
-      anonymousAlias: m.anonymous_alias || `Member_${m.id.slice(0, 6)}`,
-      avatarUrl: m.avatar_url || null,
-      bio: m.bio || '',
-      gender: formatGender(m.gender),
-      age: calculateAge(m.date_of_birth),
-      callStatus: m.is_call_available ? (m.call_status || 'idle') : 'idle',
-      ratingAvg: Number(m.member_call_rating_avg || 5.0).toFixed(1),
-      ratingCount: m.member_call_rating_count || 0,
-    }));
+    .map((m: any) => {
+      const rawStatus = m.call_status || 'idle';
+      const cleanStatus = rawStatus === 'online' ? 'idle' : rawStatus;
+      return {
+        id: m.id,
+        anonymousAlias: m.anonymous_alias || `Member_${m.id.slice(0, 6)}`,
+        avatarUrl: m.avatar_url || null,
+        bio: m.bio || '',
+        gender: formatGender(m.gender),
+        age: calculateAge(m.date_of_birth),
+        callStatus: m.is_call_available ? cleanStatus : 'offline',
+        ratingAvg: Number(m.member_call_rating_avg || 5.0).toFixed(1),
+        ratingCount: m.member_call_rating_count || 0,
+      };
+    });
 }
 
 /**
@@ -122,6 +177,8 @@ export async function toggleMemberAvailability(userId: string, isAvailable: bool
   const db = getDb();
   const now = new Date().toISOString();
 
+  const canonicalId = (await resolveCanonicalUserId(db, userId)) || userId;
+
   const { data, error } = await db
     .from('users')
     .update({
@@ -130,16 +187,16 @@ export async function toggleMemberAvailability(userId: string, isAvailable: bool
       call_status: isAvailable ? 'idle' : 'offline',
       updated_at: now,
     })
-    .eq('id', userId)
+    .eq('id', canonicalId)
     .select('id, is_call_available, call_status')
-    .single();
+    .maybeSingle();
 
-  if (error) {
+  if (error || !data) {
     console.error('[MemberCallsService] Toggle availability error:', error);
-    throw new Error(error.message);
+    throw new Error(error?.message || 'User account not found to update availability');
   }
 
-  return { success: true, isCallAvailable: data.is_call_available, callStatus: data.call_status };
+  return { success: true, isCallAvailable: data.is_call_available, callStatus: data.call_status, userId: data.id };
 }
 
 /**
@@ -149,12 +206,14 @@ export async function sendMemberCallHeartbeat(userId: string) {
   const db = getDb();
   const now = new Date().toISOString();
 
+  const canonicalId = (await resolveCanonicalUserId(db, userId)) || userId;
+
   await db
     .from('users')
     .update({
       last_call_heartbeat: now,
     })
-    .eq('id', userId);
+    .eq('id', canonicalId);
 
   return { success: true };
 }
@@ -175,7 +234,10 @@ export async function initiateMemberCall({
     throw new Error('Caller ID and Receiver ID are required.');
   }
 
-  if (callerId === receiverId) {
+  const canonicalCallerId = (await resolveCanonicalUserId(db, callerId)) || callerId;
+  const canonicalReceiverId = (await resolveCanonicalUserId(db, receiverId)) || receiverId;
+
+  if (canonicalCallerId === canonicalReceiverId) {
     throw new Error('You cannot call yourself.');
   }
 
@@ -183,7 +245,7 @@ export async function initiateMemberCall({
   const { data: caller, error: callerErr } = await db
     .from('users')
     .select('id, anonymous_alias, avatar_url, credits, is_active, call_status, gender, date_of_birth')
-    .eq('id', callerId)
+    .eq('id', canonicalCallerId)
     .single();
 
   if (callerErr || !caller || !caller.is_active) {
@@ -203,7 +265,7 @@ export async function initiateMemberCall({
   const { data: receiver, error: receiverErr } = await db
     .from('users')
     .select('id, anonymous_alias, avatar_url, is_active, is_call_available, call_status, gender, date_of_birth')
-    .eq('id', receiverId)
+    .eq('id', canonicalReceiverId)
     .single();
 
   if (receiverErr || !receiver || !receiver.is_active) {
@@ -227,8 +289,8 @@ export async function initiateMemberCall({
     .from('member_to_member_calls')
     .insert({
       call_ref: callRef,
-      caller_id: callerId,
-      receiver_id: receiverId,
+      caller_id: canonicalCallerId,
+      receiver_id: canonicalReceiverId,
       status: 'ringing',
       agora_channel_name: agoraChannelName,
       created_at: new Date().toISOString(),

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import {
   getOnlineMembers,
+  getMemberSelfStatus,
   toggleMemberAvailability,
   sendMemberCallHeartbeat,
   initiateMemberCall,
@@ -30,7 +31,7 @@ export async function OPTIONS(req: NextRequest) {
 
 /**
  * GET /api/members/calls
- * - ?currentUserId=xyz -> List available online members
+ * - ?currentUserId=xyz -> List available online members + current user status
  * - ?memberId=xyz&activeOnly=true -> Check for incoming ringing call
  */
 export async function GET(req: NextRequest) {
@@ -46,8 +47,13 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ call: activeCall }, { headers });
     }
 
+    let selfStatus = null;
+    if (currentUserId && currentUserId !== 'public') {
+      selfStatus = await getMemberSelfStatus(currentUserId);
+    }
+
     const onlineMembers = await getOnlineMembers(currentUserId || null);
-    return NextResponse.json({ members: onlineMembers }, { headers });
+    return NextResponse.json({ members: onlineMembers, selfStatus }, { headers });
   } catch (error: any) {
     console.error('[API/members/calls GET]', error);
     return NextResponse.json({ error: error.message }, { status: 500, headers });

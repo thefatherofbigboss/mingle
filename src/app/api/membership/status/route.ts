@@ -105,20 +105,31 @@ export async function GET(req: NextRequest) {
             // --- IDENTITY MIGRATION: If subscription exists but is linked to a different user_id (split identity) ---
             if (subscription.user_id !== mappedUserId && mappedUserId) {
                 try {
-                    console.log(`[Status] Identity migration initiated: ${subscription.user_id} -> ${mappedUserId} for ${email}`);
-                    
-                    const { error: updateError } = await supabase
-                        .from('user_subscriptions')
-                        .update({ 
-                            user_id: mappedUserId,
-                            updated_at: new Date().toISOString()
-                        })
-                        .eq('id', subscription.id);
-                    
-                    if (updateError) throw updateError;
-                    
-                    subscription.user_id = mappedUserId; // Update local copy
-                    console.log(`[Status] Identity migration successful for ${email}`);
+                    // Only migrate if mappedUserId actually exists in the users table to prevent FK violations
+                    const { data: mappedUserExists } = await supabase
+                        .from('users')
+                        .select('id')
+                        .eq('id', mappedUserId)
+                        .maybeSingle();
+
+                    if (mappedUserExists) {
+                        console.log(`[Status] Identity migration initiated: ${subscription.user_id} -> ${mappedUserId} for ${email}`);
+                        
+                        const { error: updateError } = await supabase
+                            .from('user_subscriptions')
+                            .update({ 
+                                user_id: mappedUserId,
+                                updated_at: new Date().toISOString()
+                            })
+                            .eq('id', subscription.id);
+                        
+                        if (updateError) throw updateError;
+                        
+                        subscription.user_id = mappedUserId; // Update local copy
+                        console.log(`[Status] Identity migration successful for ${email}`);
+                    } else {
+                        console.log(`[Status] Retaining valid DB user_id ${subscription.user_id} for ${email}`);
+                    }
                 } catch (migrationErr) {
                     console.error('[Status] Identity migration failed:', migrationErr);
                 }
