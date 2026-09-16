@@ -77,51 +77,66 @@ export async function processPaymentSuccess({
         }
 
         // 4. Send Confirmation Email with PDF Ticket
+        let inngestSent = false;
         try {
-            const { generateTicketPdf } = await import('./ticket-generator');
-            const event = await getEventById(booking.event_id);
-            if (event) {
-                const _firstItem = booking.booking_items?.[0];
-                const pdfBytes = await generateTicketPdf({
-                    booking_ref: booking.booking_ref,
-                    attendee_name: booking.attendee_name,
-                    event_title: event.title,
-                    event_date: new Date(event.start_datetime).toLocaleDateString('en-IN', { 
-                        weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
-                        hour: '2-digit', minute: '2-digit', hour12: true,
-                        timeZone: 'Asia/Kolkata'
-                    }),
-                    venue_name: event.location?.venue_name || event.location?.city || 'Selected Venue',
-                    items: booking.booking_items.map((item: { ticket_tiers: { name: string } | null; quantity: number }) => ({
-                        ticket_tier_name: item.ticket_tiers?.name || 'General Admission',
-                        quantity: item.quantity,
-                    })),
-                });
+            const { inngest } = await import('@/inngest/client');
+            await inngest.send({
+                name: 'payment/booking.verified',
+                data: { bookingId: booking.id }
+            });
+            inngestSent = true;
+            console.log(`[Payment] Dispatched booking ${booking.id} to Inngest for async ticket & email.`);
+        } catch (inngestErr) {
+            console.warn('[Payment] Inngest dispatch failed or not configured, falling back to sync email:', inngestErr);
+        }
 
-                const html = generateBookingConfirmationHtml({
-                    ...booking,
-                    booking_items: booking.booking_items?.map((item: { ticket_tiers: { name: string } | null }) => ({
-                        ...item,
-                        ticket_tier_name: item.ticket_tiers?.name || 'Ticket'
-                    }))
-                }, event);
+        if (!inngestSent) {
+            try {
+                const { generateTicketPdf } = await import('./ticket-generator');
+                const event = await getEventById(booking.event_id);
+                if (event) {
+                    const _firstItem = booking.booking_items?.[0];
+                    const pdfBytes = await generateTicketPdf({
+                        booking_ref: booking.booking_ref,
+                        attendee_name: booking.attendee_name,
+                        event_title: event.title,
+                        event_date: new Date(event.start_datetime).toLocaleDateString('en-IN', { 
+                            weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
+                            hour: '2-digit', minute: '2-digit', hour12: true,
+                            timeZone: 'Asia/Kolkata'
+                        }),
+                        venue_name: event.location?.venue_name || event.location?.city || 'Selected Venue',
+                        items: booking.booking_items.map((item: { ticket_tiers: { name: string } | null; quantity: number }) => ({
+                            ticket_tier_name: item.ticket_tiers?.name || 'General Admission',
+                            quantity: item.quantity,
+                        })),
+                    });
 
-                await sendEmail({
-                    to: booking.attendee_email,
-                    subject: `Booking Confirmed: ${event.title}`,
-                    html,
-                    cc: ['team@strangermingle.com'],
-                    attachments: [
-                        {
-                            filename: `ticket-${booking.booking_ref}.pdf`,
-                            content: Buffer.from(pdfBytes),
-                        }
-                    ]
-                });
+                    const html = generateBookingConfirmationHtml({
+                        ...booking,
+                        booking_items: booking.booking_items?.map((item: { ticket_tiers: { name: string } | null }) => ({
+                            ...item,
+                            ticket_tier_name: item.ticket_tiers?.name || 'Ticket'
+                        }))
+                    }, event);
+
+                    await sendEmail({
+                        to: booking.attendee_email,
+                        subject: `Booking Confirmed: ${event.title}`,
+                        html,
+                        cc: ['team@strangermingle.com'],
+                        attachments: [
+                            {
+                                filename: `ticket-${booking.booking_ref}.pdf`,
+                                content: Buffer.from(pdfBytes),
+                            }
+                        ]
+                    });
+                }
+            } catch (emailError) {
+                console.error('Non-critical: Failed to send confirmation email:', emailError);
+                // Don't fail the whole process if email fails
             }
-        } catch (emailError) {
-            console.error('Non-critical: Failed to send confirmation email:', emailError);
-            // Don't fail the whole process if email fails
         }
 
         return {
