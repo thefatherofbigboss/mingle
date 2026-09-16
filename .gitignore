@@ -37,3 +37,7 @@ next-env.d.ts
 # AI Agent
 .agents/
 skills-lock.json
+
+# docs
+AGENTS.md
+CLAUDE.md
