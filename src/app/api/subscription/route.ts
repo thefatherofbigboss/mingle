@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { razorpay } from '@/lib/razorpay';
 import { createAdminClient } from '@/lib/supabaseClient';
+import { activateSubscription } from '@/lib/activate-subscription';
 
 export async function POST(req: NextRequest) {
     try {
@@ -81,41 +82,56 @@ export async function POST(req: NextRequest) {
 
         console.log(`[Subscription Order] Creating ${isYearly ? 'YEARLY' : 'MONTHLY'} order: original=₹${originalAmount}, discount=₹${calculatedDiscount}, final=₹${finalAmount} (${amountInPaise} paise)`);
 
-        // Create standard Razorpay Order
-        const order = await razorpay.orders.create({
-            amount: amountInPaise,
-            currency: 'INR',
-            receipt: `sub_${Date.now().toString().slice(-8)}`,
-            notes: {
-                name,
-                email,
-                phone,
-                plan_type: isYearly ? 'yearly' : 'monthly',
-                plan_id: planId,
-                payment_type: 'subscription_membership',
-                ...(appliedPromo && {
-                    discount_code: appliedPromo.code,
-                    discount_amount: calculatedDiscount.toString(),
-                    discount_type: appliedPromo.discount_type
-                })
-            }
-        });
+        let orderId = '';
+        let isBypassed = false;
+        let amountToReturn = 0;
+        let currencyToReturn = 'INR';
+
+        if (amountInPaise === 0) {
+            // Bypass Razorpay entirely for 100% discount
+            orderId = `bypass_${Date.now()}`;
+            isBypassed = true;
+        } else {
+            // Create standard Razorpay Order
+            const order = await razorpay.orders.create({
+                amount: amountInPaise,
+                currency: 'INR',
+                receipt: `sub_${Date.now().toString().slice(-8)}`,
+                notes: {
+                    name,
+                    email,
+                    phone,
+                    plan_type: isYearly ? 'yearly' : 'monthly',
+                    plan_id: planId,
+                    payment_type: 'subscription_membership',
+                    ...(appliedPromo && {
+                        discount_code: appliedPromo.code,
+                        discount_amount: calculatedDiscount.toString(),
+                        discount_type: appliedPromo.discount_type
+                    })
+                }
+            });
+            orderId = order.id;
+            amountToReturn = (order.amount as number);
+            currencyToReturn = order.currency;
+        }
 
         // Save pending subscription record in user_subscriptions table
         const { error: dbError } = await supabase.from('user_subscriptions').insert({
-            razorpay_order_id: order.id,
+            razorpay_order_id: orderId,
             razorpay_plan_id: planId,
             plan_type: isYearly ? 'yearly' : 'monthly',
             customer_name: name,
             customer_email: email,
             customer_phone: phone,
-            status: 'created', // pending payment
+            status: isBypassed ? 'active' : 'created', // Set to active if bypassed, otherwise pending
             discount_code_id: appliedPromo?.id || null,
             discount_amount: calculatedDiscount,
             original_amount: originalAmount,
             notes: {
                 plan_type: isYearly ? 'yearly' : 'monthly',
-                order_id: order.id,
+                order_id: orderId,
+                is_bypassed: isBypassed,
                 ...(appliedPromo && {
                     discount_code: appliedPromo.code,
                     discount_type: appliedPromo.discount_type,
@@ -133,11 +149,26 @@ export async function POST(req: NextRequest) {
             );
         }
 
+        if (isBypassed) {
+            // Activate directly
+            await activateSubscription({
+                razorpayOrderId: orderId,
+                source: 'verify'
+            });
+
+            return NextResponse.json({
+                success: true,
+                bypassed: true,
+                message: 'Subscription activated directly via 100% discount',
+                orderId: orderId,
+            });
+        }
+
         return NextResponse.json({
             success: true,
-            orderId: order.id,
-            amount: order.amount,
-            currency: order.currency,
+            orderId: orderId,
+            amount: amountToReturn,
+            currency: currencyToReturn,
             customerName: name,
             customerEmail: email,
             customerPhone: phone,
