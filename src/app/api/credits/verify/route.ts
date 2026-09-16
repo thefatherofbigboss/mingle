@@ -2,8 +2,15 @@ import { NextRequest, NextResponse } from 'next/server';
 import { verifyRazorpaySignature } from '@/lib/razorpay';
 import { createAdminClient } from '@/lib/supabaseClient';
 import { findOrCreateUserByContact } from '@/lib/userProfile';
+import { getCorsHeaders, handleOptionsResponse } from '@/lib/cors';
+
+export async function OPTIONS(req: NextRequest) {
+  return handleOptionsResponse(req);
+}
 
 export async function POST(req: NextRequest) {
+  const corsHeaders = getCorsHeaders(req);
+
   try {
     const body = await req.json();
     const {
@@ -16,12 +23,18 @@ export async function POST(req: NextRequest) {
     } = body;
 
     if (!razorpayOrderId || !razorpayPaymentId || !razorpaySignature) {
-      return NextResponse.json({ error: 'Missing payment verification details' }, { status: 400 });
+      return NextResponse.json(
+        { error: 'Missing payment verification details' },
+        { status: 400, headers: corsHeaders }
+      );
     }
 
     const isValid = verifyRazorpaySignature(razorpayOrderId, razorpayPaymentId, razorpaySignature);
     if (!isValid) {
-      return NextResponse.json({ error: 'Payment signature verification failed' }, { status: 400 });
+      return NextResponse.json(
+        { error: 'Payment signature verification failed' },
+        { status: 400, headers: corsHeaders }
+      );
     }
 
     const supabase = createAdminClient();
@@ -41,7 +54,10 @@ export async function POST(req: NextRequest) {
     }
 
     if (!resolvedUserId) {
-      return NextResponse.json({ error: 'Could not resolve user account' }, { status: 404 });
+      return NextResponse.json(
+        { error: 'Could not resolve user account' },
+        { status: 404, headers: corsHeaders }
+      );
     }
 
     const addCredits = Number(creditsToAdd) || 500;
@@ -66,13 +82,19 @@ export async function POST(req: NextRequest) {
 
     console.log(`[CreditsVerify] Added ${addCredits} credits to user ${resolvedUserId}. New total: ${newCredits}`);
 
-    return NextResponse.json({
-      success: true,
-      creditsAdded: addCredits,
-      newBalance: newCredits,
-    });
+    return NextResponse.json(
+      {
+        success: true,
+        creditsAdded: addCredits,
+        newBalance: newCredits,
+      },
+      { headers: corsHeaders }
+    );
   } catch (err: any) {
     console.error('[CreditsVerify] Error verifying credits payment:', err);
-    return NextResponse.json({ error: err.message || 'Payment verification failed' }, { status: 500 });
+    return NextResponse.json(
+      { error: err.message || 'Payment verification failed' },
+      { status: 500, headers: corsHeaders }
+    );
   }
 }

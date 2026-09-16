@@ -1,8 +1,15 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createAdminClient } from '@/lib/supabaseClient';
 import { v4 as uuidv4 } from 'uuid';
+import { getCorsHeaders, handleOptionsResponse } from '@/lib/cors';
+
+export async function OPTIONS(req: NextRequest) {
+  return handleOptionsResponse(req);
+}
 
 export async function POST(req: NextRequest) {
+  const corsHeaders = getCorsHeaders(req);
+
   try {
     const body = await req.json();
     const {
@@ -20,7 +27,7 @@ export async function POST(req: NextRequest) {
     if (!reporterId || !reportedId || !reason) {
       return NextResponse.json(
         { error: 'reporterId, reportedId, and reason are required' },
-        { status: 400 }
+        { status: 400, headers: corsHeaders }
       );
     }
 
@@ -63,7 +70,7 @@ export async function POST(req: NextRequest) {
 
     if (error) {
       console.error('[ReportsApi] Error saving report:', error);
-      return NextResponse.json({ error: error.message }, { status: 500 });
+      return NextResponse.json({ error: error.message }, { status: 500, headers: corsHeaders });
     }
 
     // If attached to a call, note it on the call
@@ -81,13 +88,19 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    return NextResponse.json({
-      success: true,
-      message: 'Report submitted successfully. Our safety team will review the session immediately.',
-      reportId: report.id,
-    });
+    return NextResponse.json(
+      {
+        success: true,
+        message: 'Report submitted successfully. Our safety team will review the session immediately.',
+        reportId: report.id,
+      },
+      { headers: corsHeaders }
+    );
   } catch (err: any) {
     console.error('[ReportsApi] Unexpected error:', err);
-    return NextResponse.json({ error: err.message || 'Internal Server Error' }, { status: 500 });
+    return NextResponse.json(
+      { error: err.message || 'Internal Server Error' },
+      { status: 500, headers: corsHeaders }
+    );
   }
 }

@@ -1,15 +1,25 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createRazorpayOrder } from '@/lib/razorpay';
 import { findOrCreateUserByContact } from '@/lib/userProfile';
+import { getCorsHeaders, handleOptionsResponse } from '@/lib/cors';
+
+export async function OPTIONS(req: NextRequest) {
+  return handleOptionsResponse(req);
+}
 
 export async function POST(req: NextRequest) {
+  const corsHeaders = getCorsHeaders(req);
+
   try {
     const body = await req.json();
     const { amountInr, credits, userId, email, phone, name } = body;
 
     const amount = Number(amountInr);
     if (!amount || amount <= 0) {
-      return NextResponse.json({ error: 'Valid amount is required' }, { status: 400 });
+      return NextResponse.json(
+        { error: 'Valid amount is required' },
+        { status: 400, headers: corsHeaders }
+      );
     }
 
     let resolvedUserId = userId;
@@ -40,16 +50,22 @@ export async function POST(req: NextRequest) {
       },
     });
 
-    return NextResponse.json({
-      success: true,
-      orderId: order.id,
-      amount: order.amount,
-      currency: order.currency,
-      keyId: process.env.RAZORPAY_KEY_ID,
-      credits: credits || amount * 10,
-    });
+    return NextResponse.json(
+      {
+        success: true,
+        orderId: order.id,
+        amount: order.amount,
+        currency: order.currency,
+        keyId: process.env.RAZORPAY_KEY_ID,
+        credits: credits || amount * 10,
+      },
+      { headers: corsHeaders }
+    );
   } catch (err: any) {
     console.error('[CreditsOrder] Error creating order:', err);
-    return NextResponse.json({ error: err.message || 'Failed to create order' }, { status: 500 });
+    return NextResponse.json(
+      { error: err.message || 'Failed to create order' },
+      { status: 500, headers: corsHeaders }
+    );
   }
 }
