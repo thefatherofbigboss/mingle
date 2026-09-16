@@ -5,6 +5,7 @@ import { SM_UUID_NAMESPACE, findOrCreateUserByContact } from './userProfile';
 import { createRazorpayOrder, verifyRazorpaySignature } from './razorpay';
 import { sendEmail, generateMembershipVerificationHtml } from './email';
 import { generatePhoneAFriendTicketPdf } from './ticket-generator';
+import { inngest } from '../inngest/client';
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -550,24 +551,7 @@ export async function initiateCall({
     throw new Error(callError.message);
   }
 
-  // 1. Dispatch high-priority Web Push notification to wake up host mobile device (even if screen is off)
-  if (callStatus === 'ringing') {
-    try {
-      const { sendCallPushNotification } = await import('./pushService');
-      const callerNameForPush = callerName || call.user?.username || call.user?.anonymous_alias || 'A Member';
-      sendCallPushNotification(hostId, {
-        callId: call.id,
-        callRef: call.call_ref,
-        callerName: callerNameForPush,
-        amount: finalAmount,
-        durationMinutes: dur,
-      }).catch((pushErr) => console.error('[PhoneAFriendService] Background push dispatch error:', pushErr));
-    } catch (importErr) {
-      console.warn('[PhoneAFriendService] Push service import failed:', importErr);
-    }
-  }
-
-  // 2. Credit Conversion: 1 INR = 10 credits (Only for direct payments, not credit redemptions)
+  // 1. Credit Conversion: 1 INR = 10 credits (Only for direct payments, not credit redemptions)
   let creditsEarned = 0;
   if (paymentMethod !== 'credits') {
     creditsEarned = Math.round(Number(finalAmount) * 10);
@@ -595,184 +579,26 @@ export async function initiateCall({
     }
   }
 
-  // Record Telemetry in public.phone_a_friend_telemetry silently
-  try {
-    await db.from('phone_a_friend_telemetry').insert({
-      call_id: call.id,
-      user_id: resolvedUserId,
-      ip_address: ip || null,
-      device_fingerprint: deviceFingerprint || 'unknown',
-      user_agent: userAgent || null,
-      caller_name: callerName || null,
-      caller_email: callerEmail || null,
-      caller_phone: callerPhone || null,
-      client_metadata: {
-        device_call_count: deviceCallCount,
-        call_ref: callRef,
-        duration_minutes: dur,
-        credits_awarded: creditsEarned,
-      },
-    });
-  } catch (telemErr) {
-    console.warn('[PhoneAFriendService] Telemetry insert warning:', telemErr);
-  }
-
-  // Slot is reserved only upon successful call insertion
-  if (slotId) {
-    await db
-      .from('phone_a_friend_slots')
-      .update({ status: 'booked', updated_at: new Date().toISOString() })
-      .eq('id', slotId);
-  }
-
-  // Check / Provision Membership & Dispatch Custom Email
-  if (callerEmail) {
-    const normalizedEmail = callerEmail.trim().toLowerCase();
-    const appUrl = process.env.NEXT_PUBLIC_APP_URL || 'https://strangermingle.com';
-
-    let isExistingMember = false;
-    let verificationToken: string | null = null;
-
-    try {
-      const { data: existingSub } = await db
-        .from('user_subscriptions')
-        .select('id, status, is_verified')
-        .or(`user_id.eq.${resolvedUserId},customer_email.eq.${normalizedEmail}`)
-        .eq('status', 'active')
-        .limit(1)
-        .maybeSingle();
-
-      if (existingSub) {
-        isExistingMember = true;
-      } else {
-        // Create 1-month membership with 1-month trial
-        verificationToken = uuidv4();
-        const now = new Date();
-        const currentStart = now.toISOString();
-        const currentEnd = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000).toISOString();
-
-        await db.from('user_subscriptions').insert({
-          user_id: resolvedUserId,
-          customer_name: callerName || 'Community Friend',
-          customer_email: normalizedEmail,
-          customer_phone: callerPhone || null,
-          status: 'active',
-          is_verified: false,
-          verification_token: verificationToken,
-          plan_type: 'monthly',
-          current_period_start: currentStart,
-          current_period_end: currentEnd,
-          notes: {
-            free_trial: true,
-            source: 'phone_a_friend',
-            call_ref: callRef,
-            credits_awarded: creditsEarned,
-          },
-        });
-        console.log(`[PhoneAFriendService] Created 1-month trial subscription for ${normalizedEmail}`);
-      }
-    } catch (membershipErr) {
-      console.error('[PhoneAFriendService] Membership check/grant error:', membershipErr);
+  // 2. Dispatch Inngest Event for Background Processing (Push, Telemetry, Email, PDF, Membership)
+  await inngest.send({
+    name: 'calls/initiated',
+    data: {
+      callId: call.id,
+      callRef,
+      hostId,
+      userId: resolvedUserId,
+      callerName,
+      callerEmail,
+      callerPhone,
+      durationMinutes: dur,
+      amount: finalAmount,
+      deviceFingerprint,
+      deviceCallCount,
+      paymentMethod,
+      creditsEarned,
+      creditsNeeded,
     }
-
-    // Generate & Send PDF Call Ticket + Tailored Email
-    try {
-      const pdfBytes = await generatePhoneAFriendTicketPdf({
-        callRef,
-        callerName: callerName || 'Valued Caller',
-        callerEmail: callerEmail,
-        callerPhone: callerPhone,
-        hostName: call.host?.display_name || 'Community Host',
-        callType,
-        durationMinutes: dur,
-        amountPaid: Number(call.amount) || finalAmount,
-        scheduledTime: call.scheduled_start_time,
-        createdAt: call.created_at,
-      });
-
-      const dashboardLink = `${appUrl}/members`;
-      const verificationLink = verificationToken ? `${appUrl}/verify-membership?token=${verificationToken}` : dashboardLink;
-
-      const isPaidWithCredits = paymentMethod === 'credits';
-
-      const emailSubject = isPaidWithCredits
-        ? `Call Pass Confirmed: [${callRef}] (${creditsNeeded} Credits Redeemed)`
-        : isExistingMember
-          ? `Payment Confirmed: Your Call Pass [${callRef}] & ${creditsEarned} Credits Added`
-          : `Payment Confirmed [${callRef}] + Activate Your 1-Month Free Membership (${creditsEarned} Credits)`;
-
-      const ctaButtonHtml = (isExistingMember || isPaidWithCredits)
-        ? `
-          <div style="text-align: center; margin: 28px 0;">
-            <a href="${dashboardLink}" style="background: linear-gradient(135deg, #2563eb, #1d4ed8); color: #ffffff; text-decoration: none; padding: 14px 28px; border-radius: 12px; font-weight: bold; font-size: 15px; display: inline-block; box-shadow: 0 4px 12px rgba(37, 99, 235, 0.25);">
-              Open Member Dashboard →
-            </a>
-            <p style="font-size: 12px; color: #6b7280; margin-top: 8px;">View your active membership status and credit balance.</p>
-          </div>
-        `
-        : `
-          <div style="background-color: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 16px; padding: 20px; margin: 24px 0; text-align: center;">
-            <div style="font-size: 16px; font-weight: 700; color: #166534; margin-bottom: 6px;">🎁 Bonus: 1-Month Free Premium Membership!</div>
-            <p style="font-size: 13px; color: #15803d; margin: 0 0 16px 0;">
-              Because you called a friend, you have unlocked 1 month of complimentary access to Stranger Mingle along with <strong>${creditsEarned} credits</strong>.
-            </p>
-            <a href="${verificationLink}" style="background: linear-gradient(135deg, #16a34a, #15803d); color: #ffffff; text-decoration: none; padding: 14px 28px; border-radius: 12px; font-weight: bold; font-size: 15px; display: inline-block; box-shadow: 0 4px 12px rgba(22, 163, 74, 0.25);">
-              Verify Email & Activate Free Month →
-            </a>
-          </div>
-        `;
-
-      await sendEmail({
-        to: normalizedEmail,
-        subject: emailSubject,
-        html: `
-          <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; padding: 24px; color: #1f2937; max-width: 600px; margin: auto; border: 1px solid #f3f4f6; border-radius: 16px; background-color: #ffffff;">
-            <div style="border-bottom: 2px solid #f43f5e; padding-bottom: 12px; margin-bottom: 20px;">
-              <h1 style="color: #f43f5e; margin: 0; font-size: 22px;">Stranger Mingle</h1>
-              <p style="margin: 4px 0 0 0; color: #6b7280; font-size: 13px;">Phone a Friend - 1-on-1 Confidential Voice Call</p>
-            </div>
-            <p style="font-size: 15px; line-height: 1.5;">Hello <strong>${callerName || 'Friend'}</strong>,</p>
-            <p style="font-size: 14px; line-height: 1.5; color: #4b5563;">
-              ${
-                isPaidWithCredits
-                  ? `Your call pass has been confirmed using <strong>${creditsNeeded} Membership Credits</strong>.`
-                  : `Your payment of <strong>INR ${call.amount}/-</strong> has been confirmed. We have credited <strong>🪙 ${creditsEarned} Credits</strong> (1 INR = 10 Credits) to your account.`
-              }
-            </p>
-
-            <table style="width: 100%; border-collapse: collapse; margin: 20px 0; font-size: 14px; background: #f9fafb; border-radius: 12px; overflow: hidden;">
-              <tr><td style="padding: 10px 14px; color: #6b7280; border-bottom: 1px solid #e5e7eb;">Call Reference:</td><td style="padding: 10px 14px; font-weight: bold; color: #f43f5e; border-bottom: 1px solid #e5e7eb;">${callRef}</td></tr>
-              <tr><td style="padding: 10px 14px; color: #6b7280; border-bottom: 1px solid #e5e7eb;">Assigned Host:</td><td style="padding: 10px 14px; font-weight: bold; border-bottom: 1px solid #e5e7eb;">${call.host?.display_name || 'Host'}</td></tr>
-              <tr><td style="padding: 10px 14px; color: #6b7280; border-bottom: 1px solid #e5e7eb;">Session Duration:</td><td style="padding: 10px 14px; font-weight: bold; border-bottom: 1px solid #e5e7eb;">${dur} Minutes</td></tr>
-              ${
-                isPaidWithCredits
-                  ? `<tr><td style="padding: 10px 14px; color: #6b7280; border-bottom: 1px solid #e5e7eb;">Credits Redeemed:</td><td style="padding: 10px 14px; font-weight: bold; color: #f43f5e; border-bottom: 1px solid #e5e7eb;">-${creditsNeeded} Credits</td></tr>
-                     <tr><td style="padding: 10px 14px; color: #6b7280;">Payment Method:</td><td style="padding: 10px 14px; font-weight: bold;">Membership Credits</td></tr>`
-                  : `<tr><td style="padding: 10px 14px; color: #6b7280; border-bottom: 1px solid #e5e7eb;">Credits Added:</td><td style="padding: 10px 14px; font-weight: bold; color: #059669; border-bottom: 1px solid #e5e7eb;">+${creditsEarned} Credits</td></tr>
-                     <tr><td style="padding: 10px 14px; color: #6b7280;">Amount Paid:</td><td style="padding: 10px 14px; font-weight: bold;">INR ${call.amount}/-</td></tr>`
-              }
-            </table>
-
-            ${ctaButtonHtml}
-
-            <p style="font-size: 13px; color: #6b7280;">📎 Your official <strong>PDF Call Pass</strong> is attached to this email for your records.</p>
-            <div style="background-color: #fff1f2; border-left: 4px solid #f43f5e; padding: 12px; border-radius: 8px; margin-top: 20px; font-size: 12px; color: #9f1239;">
-              <strong>Safety Reminder:</strong> 100% Anonymous voice calls. Exchanging personal phone numbers, WhatsApp, or financial details is strictly prohibited.
-            </div>
-          </div>
-        `,
-        attachments: [
-          {
-            filename: `ticket-${callRef}.pdf`,
-            content: Buffer.from(pdfBytes),
-          },
-        ],
-      });
-      console.log(`[PhoneAFriendService] Dispatched confirmation email to ${normalizedEmail}`);
-    } catch (ticketMailErr) {
-      console.error('[PhoneAFriendService] Ticket mailing warning:', ticketMailErr);
-    }
-  }
+  });
 
   // Generate Agora token for User (using resolved user id as account)
   const userToken = generateVoiceToken({

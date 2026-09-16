@@ -627,16 +627,21 @@ export async function getPublicEventById(id: string): Promise<Event | null> {
         return null;
     }
 
-    const { data: tiers } = await supabase
-        .from('v_ticket_availability')
-        .select('*')
-        .eq('event_id', eventRow.id);
-
-    const { data: images } = await supabase.from('event_images').select('*').eq('event_id', eventRow.id).order('sort_order', { ascending: true });
-    const { data: faqs } = await supabase.from('event_faqs').select('*').eq('event_id', eventRow.id).order('sort_order', { ascending: true });
-    const { data: agenda } = await supabase.from('event_agenda').select('*').eq('event_id', eventRow.id).order('sort_order', { ascending: true });
-    const { data: tags } = await supabase.from('event_tags').select('tag:tags(name, slug)').eq('event_id', eventRow.id);
-    const { data: reviews } = await supabase.from('event_reviews').select('*, user:users!event_reviews_user_id_fkey(username, avatar_url)').eq('event_id', eventRow.id);
+    const [
+        { data: tiers },
+        { data: images },
+        { data: faqs },
+        { data: agenda },
+        { data: tags },
+        { data: reviews }
+    ] = await Promise.all([
+        supabase.from('v_ticket_availability').select('*').eq('event_id', eventRow.id),
+        supabase.from('event_images').select('*').eq('event_id', eventRow.id).order('sort_order', { ascending: true }),
+        supabase.from('event_faqs').select('*').eq('event_id', eventRow.id).order('sort_order', { ascending: true }),
+        supabase.from('event_agenda').select('*').eq('event_id', eventRow.id).order('sort_order', { ascending: true }),
+        supabase.from('event_tags').select('tag:tags(name, slug)').eq('event_id', eventRow.id),
+        supabase.from('event_reviews').select('*, user:users!event_reviews_user_id_fkey(username, avatar_url)').eq('event_id', eventRow.id)
+    ]);
 
     const event = mapPublicViewToEvent(eventRow, tiers || []);
     event.event_images = images || [];
@@ -690,21 +695,22 @@ export async function getPublicEventBySlug(slug: string): Promise<Event | null> 
     // For now, let's assume we need to join them or query them separately.
     // The previous implementation used many joins.
     
-    // Fetch tiers
-    const { data: tiers } = await supabase
-        .from('v_ticket_availability')
-        .select('*')
-        .eq('event_id', eventRow.id);
-
-    // For other details like images, faq, etc. we might still need to query the original tables.
-    // If the original tables are restricted, we might need views for them too or use admin client.
-    // But let's try querying them first. Public users usually can see images and FAQs.
-    
-    const { data: images } = await supabase.from('event_images').select('*').eq('event_id', eventRow.id).order('sort_order', { ascending: true });
-    const { data: faqs } = await supabase.from('event_faqs').select('*').eq('event_id', eventRow.id).order('sort_order', { ascending: true });
-    const { data: agenda } = await supabase.from('event_agenda').select('*').eq('event_id', eventRow.id).order('sort_order', { ascending: true });
-    const { data: tags } = await supabase.from('event_tags').select('tag:tags(name, slug)').eq('event_id', eventRow.id);
-    const { data: reviews } = await supabase.from('event_reviews').select('*, user:users!event_reviews_user_id_fkey(username, avatar_url)').eq('event_id', eventRow.id);
+    // Fetch relations concurrently for better performance
+    const [
+        { data: tiers },
+        { data: images },
+        { data: faqs },
+        { data: agenda },
+        { data: tags },
+        { data: reviews }
+    ] = await Promise.all([
+        supabase.from('v_ticket_availability').select('*').eq('event_id', eventRow.id),
+        supabase.from('event_images').select('*').eq('event_id', eventRow.id).order('sort_order', { ascending: true }),
+        supabase.from('event_faqs').select('*').eq('event_id', eventRow.id).order('sort_order', { ascending: true }),
+        supabase.from('event_agenda').select('*').eq('event_id', eventRow.id).order('sort_order', { ascending: true }),
+        supabase.from('event_tags').select('tag:tags(name, slug)').eq('event_id', eventRow.id),
+        supabase.from('event_reviews').select('*, user:users!event_reviews_user_id_fkey(username, avatar_url)').eq('event_id', eventRow.id)
+    ]);
 
     const event = mapPublicViewToEvent(eventRow, tiers || []);
     event.event_images = images || [];

@@ -11,6 +11,7 @@ import {
     processSavedSearchesCron, 
     analyticsSnapshotCron 
 } from '@/inngest/functions/crons';
+import { processCallInitiated } from '@/inngest/functions/calls';
 
 export const { GET, POST, PUT } = serve({
     client: inngest,
@@ -22,5 +23,6 @@ export const { GET, POST, PUT } = serve({
         eventRemindersCron,
         processSavedSearchesCron,
         analyticsSnapshotCron,
+        processCallInitiated,
     ],
 });

@@ -97,7 +97,7 @@ export async function getOnlineMembers(currentUserId?: string | null) {
 
   const canonicalCurrentUserId = await resolveCanonicalUserId(db, currentUserId);
 
-  // 1. Fetch real active members (including verified hosts/admins) who are available for calls
+  // 1. Prepare queries for active members and blocked users
   let query = db
     .from('users')
     .select(`
@@ -127,27 +127,22 @@ export async function getOnlineMembers(currentUserId?: string | null) {
     query = query.neq('id', canonicalCurrentUserId);
   }
 
-  const { data: members, error } = await query;
+  const blocksQuery = canonicalCurrentUserId 
+    ? db.from('user_blocks').select('blocked_id').eq('blocker_id', canonicalCurrentUserId)
+    : Promise.resolve({ data: null, error: null });
+
+  // 2. Fetch both members and blocked users concurrently
+  const [membersRes, blocksRes] = await Promise.all([query, blocksQuery]);
+  const { data: members, error } = membersRes;
 
   if (error) {
     console.error('[MemberCallsService] Error fetching online members:', error);
     throw new Error(error.message);
   }
 
-  // 2. Fetch blocked users to exclude if current user is provided
   let blockedUserIds: string[] = [];
-  if (canonicalCurrentUserId) {
-    try {
-      const { data: blocks } = await db
-        .from('user_blocks')
-        .select('blocked_id')
-        .eq('blocker_id', canonicalCurrentUserId);
-      if (blocks) {
-        blockedUserIds = blocks.map((b: any) => b.blocked_id);
-      }
-    } catch (err) {
-      console.warn('[MemberCallsService] Blocked check warning:', err);
-    }
+  if (blocksRes.data) {
+    blockedUserIds = blocksRes.data.map((b: any) => b.blocked_id);
   }
 
   // 3. Format public attributes safely (never expose real name, email, or phone)
@@ -234,19 +229,33 @@ export async function initiateMemberCall({
     throw new Error('Caller ID and Receiver ID are required.');
   }
 
-  const canonicalCallerId = (await resolveCanonicalUserId(db, callerId)) || callerId;
-  const canonicalReceiverId = (await resolveCanonicalUserId(db, receiverId)) || receiverId;
+  const [canonicalCallerIdRaw, canonicalReceiverIdRaw] = await Promise.all([
+    resolveCanonicalUserId(db, callerId),
+    resolveCanonicalUserId(db, receiverId)
+  ]);
+  const canonicalCallerId = canonicalCallerIdRaw || callerId;
+  const canonicalReceiverId = canonicalReceiverIdRaw || receiverId;
 
   if (canonicalCallerId === canonicalReceiverId) {
     throw new Error('You cannot call yourself.');
   }
 
-  // 1. Verify Caller: Must be active and have at least 10 credits (1 minute minimum)
-  const { data: caller, error: callerErr } = await db
-    .from('users')
-    .select('id, anonymous_alias, avatar_url, credits, is_active, call_status, gender, date_of_birth')
-    .eq('id', canonicalCallerId)
-    .single();
+  // 1 & 2. Verify Caller and Receiver concurrently
+  const [callerRes, receiverRes] = await Promise.all([
+    db
+      .from('users')
+      .select('id, anonymous_alias, avatar_url, credits, is_active, call_status, gender, date_of_birth')
+      .eq('id', canonicalCallerId)
+      .single(),
+    db
+      .from('users')
+      .select('id, anonymous_alias, avatar_url, is_active, is_call_available, call_status, gender, date_of_birth')
+      .eq('id', canonicalReceiverId)
+      .single()
+  ]);
+
+  const { data: caller, error: callerErr } = callerRes;
+  const { data: receiver, error: receiverErr } = receiverRes;
 
   if (callerErr || !caller || !caller.is_active) {
     throw new Error('Caller account not found or is inactive.');
@@ -260,13 +269,6 @@ export async function initiateMemberCall({
   if (caller.call_status === 'in_call' || caller.call_status === 'ringing') {
     throw new Error('You are already participating in another call.');
   }
-
-  // 2. Verify Receiver: Must be active, online, and not busy
-  const { data: receiver, error: receiverErr } = await db
-    .from('users')
-    .select('id, anonymous_alias, avatar_url, is_active, is_call_available, call_status, gender, date_of_birth')
-    .eq('id', canonicalReceiverId)
-    .single();
 
   if (receiverErr || !receiver || !receiver.is_active) {
     throw new Error('This member is unavailable.');

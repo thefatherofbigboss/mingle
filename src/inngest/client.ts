@@ -20,6 +20,23 @@ export type CreditsVerifiedData = {
     razorpayOrderId?: string;
 };
 
+export type CallInitiatedData = {
+    callId: string;
+    callRef: string;
+    hostId: string;
+    userId: string;
+    callerName?: string;
+    callerEmail?: string;
+    callerPhone?: string;
+    durationMinutes: number;
+    amount: number;
+    deviceFingerprint?: string;
+    deviceCallCount?: number;
+    paymentMethod: 'razorpay' | 'credits';
+    creditsEarned: number;
+    creditsNeeded: number;
+};
+
 export const inngest = new Inngest({
     id: 'stranger-mingle',
 });
