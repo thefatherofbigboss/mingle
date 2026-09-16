@@ -180,7 +180,6 @@ export async function POST(request: NextRequest) {
                         if (profileError) {
                             console.error('Manual profile upsert error:', profileError);
                         } else {
-                            // console.log(`Successfully synced/upserted public profile for ${userId}`);
                         }
                     }
                 }

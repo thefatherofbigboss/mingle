@@ -20,7 +20,6 @@ export async function POST(_request: Request) {
         //   );
         // }
 
-        // console.log('Fetching sitemap URLs...');
         const urls = await fetchAllSitemapUrls();
 
         if (urls.length === 0) {
@@ -33,7 +32,6 @@ export async function POST(_request: Request) {
             );
         }
 
-        // console.log(`Found ${urls.length} URLs to submit to IndexNow`);
 
         // Submit to IndexNow
         const result = await submitToIndexNow(urls);
