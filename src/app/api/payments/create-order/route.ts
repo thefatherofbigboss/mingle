@@ -45,7 +45,7 @@ export async function POST(request: NextRequest) {
         }
 
         const body = await request.json();
-        const { eventId, name, phone, email, tickets } = body;
+        const { eventId, name, phone, email, tickets, promoCode } = body;
 
         // tickets should be an array of { tierId, quantity }
         if (!eventId || !name || !phone || !tickets || !Array.isArray(tickets) || tickets.length === 0) {
@@ -96,6 +96,46 @@ export async function POST(request: NextRequest) {
         }
 
         const supabase = createServerClient();
+        const adminClient = createAdminClient();
+
+        // --- PROMO CODE VALIDATION ---
+        let discountAmount = 0;
+        let finalAmount = totalAmount;
+        let appliedPromoId = null;
+
+        if (promoCode && totalAmount > 0) {
+            const { data: promo, error: promoError } = await adminClient
+                .from('promo_codes')
+                .select('*')
+                .eq('code', promoCode.trim().toUpperCase())
+                .single();
+
+            if (!promoError && promo) {
+                const now = new Date();
+                const isValidEvent = promo.event_id === eventId;
+                const isActive = promo.is_active;
+                const isValidFrom = !promo.valid_from || new Date(promo.valid_from) <= now;
+                const isValidUntil = !promo.valid_until || new Date(promo.valid_until) >= now;
+                const isWithinLimits = promo.max_uses === null || (promo.used_count || 0) < promo.max_uses;
+
+                if (isValidEvent && isActive && isValidFrom && isValidUntil && isWithinLimits) {
+                    if (promo.discount_type === 'percentage') {
+                        discountAmount = (totalAmount * promo.discount_value) / 100;
+                    } else if (promo.discount_type === 'fixed_amount') {
+                        discountAmount = promo.discount_value;
+                    }
+
+                    if (discountAmount > totalAmount) {
+                        discountAmount = totalAmount;
+                    }
+                    
+                    finalAmount = Math.max(0, totalAmount - discountAmount);
+                    appliedPromoId = promo.id;
+                }
+            }
+        }
+        // --- END PROMO CODE VALIDATION ---
+
         const { data: { user: authUser } } = await supabase.auth.getUser();
         let userId = authUser?.id || null;
 
@@ -115,8 +155,6 @@ export async function POST(request: NextRequest) {
         if (!userId && sanitizedEmail) {
             console.log(`Processing guest checkout for email: ${sanitizedEmail}`);
             try {
-                const adminClient = createAdminClient();
-                
                 // 1. Check if user already exists in public.users
                 const { data: existingUser, error: _searchError } = await adminClient
                     .from('users')
@@ -193,7 +231,7 @@ export async function POST(request: NextRequest) {
         }
 
         // Handle Free Booking
-        if (totalAmount === 0) {
+        if (finalAmount === 0) {
             const itemsForRpc = bookingItems.map(item => ({
                 tierId: item.ticket_tier_id,
                 quantity: item.quantity,
@@ -207,9 +245,9 @@ export async function POST(request: NextRequest) {
                 p_attendee_name: sanitizedName,
                 p_attendee_email: sanitizedEmail,
                 p_attendee_phone: cleanedPhone || null,
-                p_total_amount: 0,
-                p_subtotal: 0,
-                p_discount_amount: 0,
+                p_total_amount: finalAmount,
+                p_subtotal: totalAmount,
+                p_discount_amount: discountAmount,
                 p_razorpay_order_id: null,
                 p_items: itemsForRpc
             });
@@ -217,6 +255,22 @@ export async function POST(request: NextRequest) {
             if (rpcError || !bookingId) {
                 console.error('Failed to create free booking via RPC:', rpcError);
                 return NextResponse.json({ error: rpcError?.message || 'Failed to create booking' }, { status: 400 });
+            }
+
+            // Update promo code if applied
+            if (appliedPromoId) {
+                await adminClient.from('bookings').update({ promo_code_id: appliedPromoId }).eq('id', bookingId);
+                // The used_count should ideally be incremented inside confirm_booking_payment_v2, 
+                // but since free booking is confirmed immediately, we can increment it here or rely on processPaymentSuccess.
+                // Let's increment it here for safety.
+                const { error: rpcIncErr } = await adminClient.rpc('increment_promo_code_usage', { p_promo_id: appliedPromoId });
+                if (rpcIncErr) {
+                    console.error('RPC failed, falling back to basic increment:', rpcIncErr);
+                    const { data: currentPromo } = await adminClient.from('promo_codes').select('used_count').eq('id', appliedPromoId).single();
+                    if (currentPromo) {
+                        await adminClient.from('promo_codes').update({ used_count: (currentPromo.used_count || 0) + 1 }).eq('id', appliedPromoId);
+                    }
+                }
             }
 
             // Process free booking success (confirm and send email)
@@ -248,7 +302,7 @@ export async function POST(request: NextRequest) {
 
         // Create Razorpay Order
         const razorpayOrder = await createRazorpayOrder({
-            amount: totalAmount * 100, // Convert to paise
+            amount: Math.round(finalAmount * 100), // Convert to paise
             currency: 'INR',
             receipt: `receipt_${Date.now()}`,
             notes: {
@@ -271,9 +325,9 @@ export async function POST(request: NextRequest) {
             p_attendee_name: sanitizedName,
             p_attendee_email: sanitizedEmail,
             p_attendee_phone: cleanedPhone || null,
-            p_total_amount: totalAmount,
+            p_total_amount: finalAmount,
             p_subtotal: totalAmount,
-            p_discount_amount: 0,
+            p_discount_amount: discountAmount,
             p_razorpay_order_id: razorpayOrder.id,
             p_items: itemsForRpc
         });
@@ -281,6 +335,11 @@ export async function POST(request: NextRequest) {
         if (rpcError || !bookingId) {
             console.error('Failed to create booking via RPC:', rpcError);
             return NextResponse.json({ error: rpcError?.message || 'Failed to create booking' }, { status: 400 });
+        }
+
+        // Update promo code if applied
+        if (appliedPromoId) {
+            await adminClient.from('bookings').update({ promo_code_id: appliedPromoId }).eq('id', bookingId);
         }
 
         return NextResponse.json({
