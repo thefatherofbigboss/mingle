@@ -228,6 +228,9 @@ export async function POST(request: NextRequest) {
 
         if (!userId) {
             console.warn('WARNING: No userId could be established for booking. If bookings.user_id is non-nullable, this will fail.');
+            return NextResponse.json({ 
+                error: 'Could not create or find user profile. The phone number or email might already be associated with another account.' 
+            }, { status: 400 });
         }
 
         // Handle Free Booking
