@@ -37,6 +37,15 @@ export type CallInitiatedData = {
     creditsNeeded: number;
 };
 
+export type HostStatsUpdateData = {
+    hostId: string;
+};
+
+type Events = {
+    'host/stats.update': { data: HostStatsUpdateData };
+    // other events can be typed here or fallback to generic
+};
+
 export const inngest = new Inngest({
     id: 'stranger-mingle',
 });
