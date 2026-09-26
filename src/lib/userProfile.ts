@@ -247,23 +247,48 @@ export async function findOrCreateUserByContact(data: {
         }
     }
 
-    // 3. Create new skeleton record (retry on rare alias/username collision)
-    console.log(`[UserService] Creating skeleton record for new customer: ${email}`);
+    // 3. Create new skeleton record via Auth (fixes the stranded user bug)
+    console.log(`[UserService] Creating auth and public record for new customer: ${email}`);
     const baseUsername = (name || email.split('@')[0]).slice(0, 50);
+    
+    // Create the user in Auth first so they have a canonical identity
+    const { data: authUser, error: authError } = await supabase.auth.admin.createUser({
+        email: email,
+        phone: phone || undefined,
+        password: Math.random().toString(36).slice(-10) + Math.random().toString(36).slice(-10),
+        email_confirm: true,
+        user_metadata: { 
+            full_name: name || baseUsername,
+            source: 'guest_checkout'
+        }
+    });
+
+    if (authError || !authUser?.user) {
+        if (authError?.status === 422 || authError?.message?.toLowerCase().includes('already been registered')) {
+            // Unlikely to hit this due to step 1, but just in case
+            console.warn('[UserService] Auth user exists but not in public.users, handling race condition');
+        } else {
+            console.error('[UserService] Error creating auth user for skeleton:', authError);
+            return null;
+        }
+    }
+
+    const userId = authUser?.user?.id || uuidv4();
 
     for (let attempt = 0; attempt < 3; attempt++) {
         const suffix = attempt === 0 ? '' : `_${attempt}`;
         const { data: created, error } = await supabase
             .from('users')
-            .insert({
-                id: uuidv4(),
+            .upsert({
+                id: userId,
                 email,
                 phone: phone || null,
                 username: `${baseUsername}${suffix}`.slice(0, 60),
                 anonymous_alias: `Stranger_${Math.floor(1000 + Math.random() * 9000)}`,
                 role: 'member',
+                is_verified: false,
                 updated_at: new Date().toISOString(),
-            })
+            }, { onConflict: 'email' }) // Upsert safely if email exists
             .select('id')
             .single();
 
@@ -272,13 +297,7 @@ export async function findOrCreateUserByContact(data: {
         }
 
         if (error?.code === '23505') {
-            const { data: existingAfterRace } = await supabase
-                .from('users')
-                .select('id')
-                .eq('email', email)
-                .maybeSingle();
-            if (existingAfterRace) return existingAfterRace.id;
-            continue;
+            continue; // username collision, try next suffix
         }
 
         console.error('[UserService] Error creating skeleton user:', error);
