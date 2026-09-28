@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { createServerClient } from '@/lib/supabaseClient';
+import { createAdminClient } from '@/lib/supabaseClient';
 
 // Rate limiting helper (simple in-memory cache)
 const submissionsCache = new Map<string, number[]>();
@@ -83,7 +83,7 @@ export async function POST(request: NextRequest) {
                 .substring(0, 5000); // Limit length
         };
 
-        const supabase = createServerClient();
+        const supabase = createAdminClient();
         
         // Prepare the insert object
         // Note: we use 'subject' as a fallback for 'submission_type' until the column is added

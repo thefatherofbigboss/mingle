@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { createServerClient } from '@/lib/supabaseClient';
+import { createAdminClient } from '@/lib/supabaseClient';
 
 // Simple in-memory rate limiting (max 3 submissions per IP per hour)
 const hostAppCache = new Map<string, number[]>();
@@ -92,7 +92,7 @@ export async function POST(request: NextRequest) {
             return arr.map(item => sanitize(String(item)));
         };
 
-        const supabase = createServerClient();
+        const supabase = createAdminClient();
 
         const insertData = {
             full_name: sanitize(full_name),
