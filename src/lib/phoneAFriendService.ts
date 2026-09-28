@@ -1,6 +1,7 @@
 import { createAdminClient } from './supabaseClient';
 import { generateVoiceToken, getAgoraAppId, isAgoraConfigured } from './agoraService';
 import { v4 as uuidv4, v5 as uuidv5 } from 'uuid';
+import { redis } from './redis';
 import { SM_UUID_NAMESPACE, findOrCreateUserByContact } from './userProfile';
 import { createRazorpayOrder, verifyRazorpaySignature } from './razorpay';
 import { sendEmail, generateMembershipVerificationHtml } from './email';
@@ -61,6 +62,11 @@ function getDb() {
 export async function getApprovedCallingHosts() {
   const db = getDb();
 
+  // 1. Fetch online hosts from Redis (using Sorted Sets)
+  const cutoff = Date.now() - 15 * 60 * 1000;
+  await redis.zremrangebyscore('online_hosts', '-inf', cutoff);
+  const onlineHostIds = await redis.zrange('online_hosts', cutoff, '+inf');
+
   const { data, error } = await db
     .from('phone_a_friend_host_settings')
     .select(`
@@ -89,7 +95,6 @@ export async function getApprovedCallingHosts() {
       )
     `)
     .eq('is_enabled', true)
-    .order('is_online', { ascending: false })
     .order('rating_avg', { ascending: false });
 
   if (error) {
@@ -97,7 +102,16 @@ export async function getApprovedCallingHosts() {
     throw new Error(error.message);
   }
 
-  return data || [];
+  if (!data) return [];
+
+  return data.map((host: any) => ({
+    ...host,
+    is_online: onlineHostIds.includes(host.host_id)
+  })).sort((a: any, b: any) => {
+    if (a.is_online && !b.is_online) return -1;
+    if (!a.is_online && b.is_online) return 1;
+    return (b.rating_avg || 0) - (a.rating_avg || 0);
+  });
 }
 
 /**
@@ -190,8 +204,13 @@ export async function updateHostCallingSettings(hostId: string, payload: Record<
  * Host toggles their online presence.
  */
 export async function toggleHostOnlinePresence(hostId: string, isOnline: boolean) {
-  const db = getDb();
+  if (isOnline) {
+    await redis.zadd('online_hosts', Date.now(), hostId);
+  } else {
+    await redis.zrem('online_hosts', hostId);
+  }
 
+  const db = getDb();
   const now = new Date().toISOString();
   return updateHostCallingSettings(hostId, {
     is_online: isOnline,

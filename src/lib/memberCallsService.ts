@@ -94,9 +94,12 @@ export async function getOnlineMembers(currentUserId?: string | null) {
   const db = getDb();
   const canonicalCurrentUserId = await resolveCanonicalUserId(db, currentUserId);
 
-  // 1. Fetch online user IDs from Redis
-  const keys = await redis.keys('online_member:*');
-  const onlineUserIds = keys.map(k => k.split(':')[1]);
+  // 1. Fetch online user IDs from Redis (using Sorted Sets for O(1) performance)
+  const cutoff = Date.now() - 15 * 60 * 1000;
+  // First, clean up expired users
+  await redis.zremrangebyscore('online_members', '-inf', cutoff);
+  // Then get everyone who is still active
+  const onlineUserIds = await redis.zrange('online_members', cutoff, '+inf');
 
   if (onlineUserIds.length === 0) return [];
 
@@ -175,9 +178,9 @@ export async function toggleMemberAvailability(userId: string, isAvailable: bool
   const canonicalId = (await resolveCanonicalUserId(db, userId)) || userId;
 
   if (isAvailable) {
-    await redis.set(`online_member:${canonicalId}`, 'true', 'EX', 15 * 60);
+    await redis.zadd('online_members', Date.now(), canonicalId);
   } else {
-    await redis.del(`online_member:${canonicalId}`);
+    await redis.zrem('online_members', canonicalId);
   }
 
   const { data, error } = await db
@@ -208,7 +211,7 @@ export async function sendMemberCallHeartbeat(userId: string) {
 
   const canonicalId = (await resolveCanonicalUserId(db, userId)) || userId;
 
-  await redis.set(`online_member:${canonicalId}`, 'true', 'EX', 15 * 60);
+  await redis.zadd('online_members', Date.now(), canonicalId);
 
   return { success: true };
 }
