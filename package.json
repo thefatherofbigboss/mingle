@@ -17,6 +17,7 @@
     "firebase-admin": "^13.7.0",
     "gray-matter": "^4.0.3",
     "inngest": "^4.20.0",
+    "ioredis": "^6.0.0",
     "next": "latest",
     "pdf-lib": "^1.17.1",
     "qrcode": "^1.5.4",

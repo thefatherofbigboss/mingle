@@ -1,7 +1,7 @@
 import { createAdminClient } from './supabaseClient';
 import { generateVoiceToken, getAgoraAppId, isAgoraConfigured } from './agoraService';
 import { v4 as uuidv4 } from 'uuid';
-
+import { redis } from './redis';
 function getDb() {
   return createAdminClient();
 }
@@ -92,12 +92,15 @@ export async function getMemberSelfStatus(userId: string) {
  */
 export async function getOnlineMembers(currentUserId?: string | null) {
   const db = getDb();
-  // Cutoff for active presence: 15 minutes of heartbeat inactivity
-  const heartbeatCutoff = new Date(Date.now() - 15 * 60 * 1000).toISOString();
-
   const canonicalCurrentUserId = await resolveCanonicalUserId(db, currentUserId);
 
-  // 1. Prepare queries for active members and blocked users
+  // 1. Fetch online user IDs from Redis
+  const keys = await redis.keys('online_member:*');
+  const onlineUserIds = keys.map(k => k.split(':')[1]);
+
+  if (onlineUserIds.length === 0) return [];
+
+  // 2. Prepare queries for active members and blocked users
   let query = db
     .from('users')
     .select(`
@@ -110,16 +113,13 @@ export async function getOnlineMembers(currentUserId?: string | null) {
       call_status,
       member_call_rating_avg,
       member_call_rating_count,
-      last_call_heartbeat,
       is_call_available,
       updated_at
     `)
+    .in('id', onlineUserIds)
     .eq('is_active', true)
     .in('role', ['member', 'host', 'admin'])
-    .eq('is_call_available', true)
     .neq('call_status', 'offline')
-    .or(`last_call_heartbeat.gte.${heartbeatCutoff},last_call_heartbeat.is.null`)
-    .order('last_call_heartbeat', { ascending: false, nullsFirst: false })
     .order('updated_at', { ascending: false })
     .limit(30);
 
@@ -174,11 +174,16 @@ export async function toggleMemberAvailability(userId: string, isAvailable: bool
 
   const canonicalId = (await resolveCanonicalUserId(db, userId)) || userId;
 
+  if (isAvailable) {
+    await redis.set(`online_member:${canonicalId}`, 'true', 'EX', 15 * 60);
+  } else {
+    await redis.del(`online_member:${canonicalId}`);
+  }
+
   const { data, error } = await db
     .from('users')
     .update({
       is_call_available: isAvailable,
-      last_call_heartbeat: now,
       call_status: isAvailable ? 'idle' : 'offline',
       updated_at: now,
     })
@@ -203,12 +208,7 @@ export async function sendMemberCallHeartbeat(userId: string) {
 
   const canonicalId = (await resolveCanonicalUserId(db, userId)) || userId;
 
-  await db
-    .from('users')
-    .update({
-      last_call_heartbeat: now,
-    })
-    .eq('id', canonicalId);
+  await redis.set(`online_member:${canonicalId}`, 'true', 'EX', 15 * 60);
 
   return { success: true };
 }
