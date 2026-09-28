@@ -1,27 +1,19 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createAdminClient } from '@/lib/supabaseClient';
+import { redis } from '@/lib/redis';
 
-// Rate limiting helper (simple in-memory cache)
-const submissionsCache = new Map<string, number[]>();
-const RATE_LIMIT_WINDOW = 60 * 60 * 1000; // 1 hour
 const MAX_SUBMISSIONS_PER_IP = 5;
 
-function isRateLimited(ip: string): boolean {
-    const now = Date.now();
-    const submissions = submissionsCache.get(ip) || [];
+async function isRateLimited(ip: string): Promise<boolean> {
+    const key = `rate_limit:contact:${ip}`;
+    const current = await redis.incr(key);
     
-    // Remove old submissions outside the window
-    const recentSubmissions = submissions.filter(time => now - time < RATE_LIMIT_WINDOW);
-    
-    if (recentSubmissions.length >= MAX_SUBMISSIONS_PER_IP) {
-        return true;
+    if (current === 1) {
+        // Set expiry on the first request (e.g., 1 hour = 3600 seconds)
+        await redis.expire(key, 3600);
     }
     
-    // Add current submission
-    recentSubmissions.push(now);
-    submissionsCache.set(ip, recentSubmissions);
-    
-    return false;
+    return current > MAX_SUBMISSIONS_PER_IP;
 }
 
 function getClientIP(request: NextRequest): string {
@@ -35,7 +27,7 @@ export async function POST(request: NextRequest) {
         const clientIP = getClientIP(request);
         
         // Rate limiting check
-        if (isRateLimited(clientIP)) {
+        if (await isRateLimited(clientIP)) {
             return NextResponse.json(
                 { error: 'Too many requests. Please try again later.' },
                 { status: 429 }

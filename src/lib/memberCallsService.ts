@@ -40,9 +40,16 @@ export function formatGender(genderString: string | null | undefined): string {
 async function resolveCanonicalUserId(db: any, identifier?: string | null): Promise<string | null> {
   if (!identifier || identifier === 'public') return null;
 
+  const cacheKey = `canonical_id:${identifier}`;
+  const cachedId = await redis.get(cacheKey);
+  if (cachedId) return cachedId as string;
+
   // 1. Direct ID check
   const { data: direct } = await db.from('users').select('id').eq('id', identifier).maybeSingle();
-  if (direct) return direct.id;
+  if (direct) {
+    await redis.setex(cacheKey, 86400, direct.id);
+    return direct.id;
+  }
 
   // 2. Lookup by subscription user_id or customer_email
   const { data: sub } = await db
@@ -52,12 +59,19 @@ async function resolveCanonicalUserId(db: any, identifier?: string | null): Prom
     .order('created_at', { ascending: false })
     .limit(1)
     .maybeSingle();
-  if (sub?.user_id) return sub.user_id;
+  if (sub?.user_id) {
+    await redis.setex(cacheKey, 86400, sub.user_id);
+    return sub.user_id;
+  }
 
   // 3. Lookup by email in users table
   const { data: byEmail } = await db.from('users').select('id').eq('email', identifier).maybeSingle();
-  if (byEmail) return byEmail.id;
+  if (byEmail) {
+    await redis.setex(cacheKey, 86400, byEmail.id);
+    return byEmail.id;
+  }
 
+  await redis.setex(cacheKey, 86400, identifier);
   return identifier;
 }
 
@@ -69,6 +83,12 @@ export async function getMemberSelfStatus(userId: string) {
   const canonicalId = await resolveCanonicalUserId(db, userId);
   if (!canonicalId) return null;
 
+  const cacheKey = `user_status:${canonicalId}`;
+  const cachedStatus = await redis.get(cacheKey);
+  if (cachedStatus) {
+    return typeof cachedStatus === 'string' ? JSON.parse(cachedStatus) : cachedStatus;
+  }
+
   const { data: user } = await db
     .from('users')
     .select('id, is_call_available, call_status, credits')
@@ -78,12 +98,15 @@ export async function getMemberSelfStatus(userId: string) {
   if (!user) return null;
 
   const rawStatus = user.call_status || 'idle';
-  return {
+  const statusData = {
     userId: user.id,
     isCallAvailable: Boolean(user.is_call_available),
     callStatus: rawStatus === 'online' ? 'idle' : rawStatus,
     credits: Number(user.credits || 0),
   };
+  
+  await redis.setex(cacheKey, 60, JSON.stringify(statusData));
+  return statusData;
 }
 
 /**
@@ -103,54 +126,79 @@ export async function getOnlineMembers(currentUserId?: string | null) {
 
   if (onlineUserIds.length === 0) return [];
 
-  // 2. Prepare queries for active members and blocked users
-  let query = db
-    .from('users')
-    .select(`
-      id,
-      anonymous_alias,
-      avatar_url,
-      bio,
-      gender,
-      date_of_birth,
-      call_status,
-      member_call_rating_avg,
-      member_call_rating_count,
-      is_call_available,
-      updated_at
-    `)
-    .in('id', onlineUserIds)
-    .eq('is_active', true)
-    .in('role', ['member', 'host', 'admin'])
-    .neq('call_status', 'offline')
-    .order('updated_at', { ascending: false })
-    .limit(30);
-
-  if (canonicalCurrentUserId) {
-    query = query.neq('id', canonicalCurrentUserId);
-  }
-
+  // 2. Fetch blocked users
   const blocksQuery = canonicalCurrentUserId 
     ? db.from('user_blocks').select('blocked_id').eq('blocker_id', canonicalCurrentUserId)
     : Promise.resolve({ data: null, error: null });
 
-  // 2. Fetch both members and blocked users concurrently
-  const [membersRes, blocksRes] = await Promise.all([query, blocksQuery]);
-  const { data: members, error } = membersRes;
-
-  if (error) {
-    console.error('[MemberCallsService] Error fetching online members:', error);
-    throw new Error(error.message);
-  }
-
+  const blocksRes = await blocksQuery;
   let blockedUserIds: string[] = [];
   if (blocksRes.data) {
     blockedUserIds = blocksRes.data.map((b: any) => b.blocked_id);
   }
 
-  // 3. Format public attributes safely (never expose real name, email, or phone)
-  return (members || [])
-    .filter((m: any) => !blockedUserIds.includes(m.id))
+  // 3. Fetch profiles from Redis first
+  const profileKeys = onlineUserIds.map((id: any) => `user_profile:${id}`);
+  const cachedProfilesRaw = profileKeys.length > 0 ? await redis.mget(...profileKeys) : [];
+  
+  const cachedProfiles = cachedProfilesRaw.map((p: any) => {
+    if (!p) return null;
+    return typeof p === 'string' ? JSON.parse(p) : p;
+  });
+  
+  const missingIds = onlineUserIds.filter((_, i) => !cachedProfiles[i]);
+  let foundProfiles = cachedProfiles.filter(p => p !== null);
+  
+  if (missingIds.length > 0) {
+    const { data: dbProfiles, error } = await db
+      .from('users')
+      .select(`
+        id,
+        anonymous_alias,
+        avatar_url,
+        bio,
+        gender,
+        date_of_birth,
+        call_status,
+        member_call_rating_avg,
+        member_call_rating_count,
+        is_call_available,
+        updated_at,
+        is_active,
+        role
+      `)
+      .in('id', missingIds)
+      .eq('is_active', true)
+      .in('role', ['member', 'host', 'admin'])
+      .neq('call_status', 'offline');
+
+    if (error) {
+      console.error('[MemberCallsService] Error fetching online members:', error);
+      throw new Error(error.message);
+    }
+
+    if (dbProfiles) {
+      // Cache the fetched profiles
+      await Promise.all(dbProfiles.map(p => 
+        redis.setex(`user_profile:${p.id}`, 3600, JSON.stringify(p))
+      ));
+      foundProfiles = [...foundProfiles, ...dbProfiles];
+    }
+  }
+
+  // Sort by updated_at desc (which was what the DB query did)
+  foundProfiles.sort((a: any, b: any) => {
+    return new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime();
+  });
+
+  // Filter out current user and blocked users
+  if (canonicalCurrentUserId) {
+    foundProfiles = foundProfiles.filter(m => m.id !== canonicalCurrentUserId);
+  }
+
+  // 4. Format public attributes safely (never expose real name, email, or phone)
+  return foundProfiles
+    .filter((m: any) => !blockedUserIds.includes(m.id) && m.is_active && m.call_status !== 'offline')
     .map((m: any) => {
       const rawStatus = m.call_status || 'idle';
       const cleanStatus = rawStatus === 'online' ? 'idle' : rawStatus;
@@ -165,7 +213,8 @@ export async function getOnlineMembers(currentUserId?: string | null) {
         ratingAvg: Number(m.member_call_rating_avg || 5.0).toFixed(1),
         ratingCount: m.member_call_rating_count || 0,
       };
-    });
+    })
+    .slice(0, 30); // Enforce the limit of 30 after sorting and filtering
 }
 
 /**
@@ -198,6 +247,9 @@ export async function toggleMemberAvailability(userId: string, isAvailable: bool
     console.error('[MemberCallsService] Toggle availability error:', error);
     throw new Error(error?.message || 'User account not found to update availability');
   }
+
+  await redis.del(`user_status:${canonicalId}`);
+  await redis.del(`user_profile:${canonicalId}`);
 
   return { success: true, isCallAvailable: data.is_call_available, callStatus: data.call_status, userId: data.id };
 }
@@ -317,7 +369,12 @@ export async function initiateMemberCall({
   await db
     .from('users')
     .update({ call_status: 'ringing' })
-    .in('id', [callerId, receiverId]);
+    .in('id', [canonicalCallerId, canonicalReceiverId]);
+
+  await redis.del(`user_status:${canonicalCallerId}`);
+  await redis.del(`user_status:${canonicalReceiverId}`);
+  await redis.del(`user_profile:${canonicalCallerId}`);
+  await redis.del(`user_profile:${canonicalReceiverId}`);
 
   return {
     success: true,
@@ -385,6 +442,11 @@ export async function respondToMemberCall({
       .update({ call_status: 'in_call' })
       .in('id', [call.caller_id, call.receiver_id]);
 
+    await redis.del(`user_status:${call.caller_id}`);
+    await redis.del(`user_status:${call.receiver_id}`);
+    await redis.del(`user_profile:${call.caller_id}`);
+    await redis.del(`user_profile:${call.receiver_id}`);
+
     return { success: true, status: 'accepted', call: updatedCall };
   } else {
     // Reject call
@@ -406,6 +468,11 @@ export async function respondToMemberCall({
       .from('users')
       .update({ call_status: 'idle' })
       .in('id', [call.caller_id, call.receiver_id]);
+
+    await redis.del(`user_status:${call.caller_id}`);
+    await redis.del(`user_status:${call.receiver_id}`);
+    await redis.del(`user_profile:${call.caller_id}`);
+    await redis.del(`user_profile:${call.receiver_id}`);
 
     return { success: true, status: 'rejected', call: updatedCall };
   }
@@ -448,6 +515,11 @@ export async function cancelMemberCall({
     .from('users')
     .update({ call_status: 'idle' })
     .in('id', [call.caller_id, call.receiver_id]);
+
+  await redis.del(`user_status:${call.caller_id}`);
+  await redis.del(`user_status:${call.receiver_id}`);
+  await redis.del(`user_profile:${call.caller_id}`);
+  await redis.del(`user_profile:${call.receiver_id}`);
 
   return { success: true };
 }
@@ -552,6 +624,11 @@ export async function endMemberCall({
     .from('users')
     .update({ call_status: 'idle' })
     .in('id', [call.caller_id, call.receiver_id]);
+
+  await redis.del(`user_status:${call.caller_id}`);
+  await redis.del(`user_status:${call.receiver_id}`);
+  await redis.del(`user_profile:${call.caller_id}`);
+  await redis.del(`user_profile:${call.receiver_id}`);
 
   return {
     success: true,
