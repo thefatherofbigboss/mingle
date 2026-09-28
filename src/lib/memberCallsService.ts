@@ -790,8 +790,6 @@ export async function submitMemberCallRating({
  */
 export async function getActiveIncomingCallForMember(memberId: string) {
   const canonicalId = await resolveCanonicalUserId(getDb(), memberId) || memberId;
-  const cachedCall = await redis.get(`member_incoming_call:${canonicalId}`);
-  if (cachedCall) return JSON.parse(cachedCall);
 
   const db = getDb();
   const sixtySecondsAgo = new Date(Date.now() - 60 * 1000).toISOString();
@@ -824,7 +822,9 @@ export async function getActiveIncomingCallForMember(memberId: string) {
  */
 export async function getMemberCallStatus(callId: string) {
   const cachedCall = await redis.get(`member_call_status:${callId}`);
-  if (cachedCall) return JSON.parse(cachedCall);
+  if (cachedCall) {
+    return typeof cachedCall === 'string' ? JSON.parse(cachedCall) : cachedCall;
+  }
 
   const db = getDb();
   const { data: call } = await db
