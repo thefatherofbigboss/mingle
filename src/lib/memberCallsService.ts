@@ -790,6 +790,15 @@ export async function submitMemberCallRating({
  */
 export async function getActiveIncomingCallForMember(memberId: string) {
   const canonicalId = await resolveCanonicalUserId(getDb(), memberId) || memberId;
+  const cachedCall = await redis.get(`member_incoming_call:${canonicalId}`);
+  if (cachedCall) {
+    try {
+      const parsed = typeof cachedCall === 'string' ? JSON.parse(cachedCall) : cachedCall;
+      return parsed;
+    } catch (e) {
+      console.error('[getActiveIncomingCallForMember] Redis parse error:', e);
+    }
+  }
 
   const db = getDb();
   const sixtySecondsAgo = new Date(Date.now() - 60 * 1000).toISOString();
