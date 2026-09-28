@@ -10,6 +10,7 @@ import {
   endMemberCall,
   submitMemberCallRating,
   getActiveIncomingCallForMember,
+  getMemberCallStatus,
 } from '@/lib/memberCallsService';
 
 function corsHeaders(req: NextRequest) {
@@ -41,6 +42,12 @@ export async function GET(req: NextRequest) {
     const currentUserId = searchParams.get('currentUserId');
     const memberId = searchParams.get('memberId');
     const activeOnly = searchParams.get('activeOnly');
+    const callId = searchParams.get('callId');
+
+    if (callId) {
+      const call = await getMemberCallStatus(callId);
+      return NextResponse.json({ call }, { headers });
+    }
 
     if (memberId && activeOnly === 'true') {
       const activeCall = await getActiveIncomingCallForMember(memberId);

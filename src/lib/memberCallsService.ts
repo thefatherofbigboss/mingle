@@ -376,15 +376,21 @@ export async function initiateMemberCall({
   await redis.del(`user_profile:${canonicalCallerId}`);
   await redis.del(`user_profile:${canonicalReceiverId}`);
 
+  const callPayload = {
+    ...call,
+    callerAge: calculateAge(call.caller?.date_of_birth),
+    callerGender: formatGender(call.caller?.gender),
+    receiverAge: calculateAge(call.receiver?.date_of_birth),
+    receiverGender: formatGender(call.receiver?.gender),
+  };
+
+  // Cache the incoming call and call status in Redis to save DB queries
+  await redis.setex(`member_incoming_call:${canonicalReceiverId}`, 65, JSON.stringify(callPayload));
+  await redis.setex(`member_call_status:${call.id}`, 3600, JSON.stringify(callPayload));
+
   return {
     success: true,
-    call: {
-      ...call,
-      callerAge: calculateAge(call.caller?.date_of_birth),
-      callerGender: formatGender(call.caller?.gender),
-      receiverAge: calculateAge(call.receiver?.date_of_birth),
-      receiverGender: formatGender(call.receiver?.gender),
-    },
+    call: callPayload,
   };
 }
 
@@ -447,7 +453,11 @@ export async function respondToMemberCall({
     await redis.del(`user_profile:${call.caller_id}`);
     await redis.del(`user_profile:${call.receiver_id}`);
 
-    return { success: true, status: 'accepted', call: updatedCall };
+    const updatedPayload = { ...call, ...updatedCall };
+    await redis.del(`member_incoming_call:${call.receiver_id}`);
+    await redis.setex(`member_call_status:${call.id}`, 3600, JSON.stringify(updatedPayload));
+
+    return { success: true, status: 'accepted', call: updatedPayload };
   } else {
     // Reject call
     const { data: updatedCall, error: updateErr } = await db
@@ -474,7 +484,11 @@ export async function respondToMemberCall({
     await redis.del(`user_profile:${call.caller_id}`);
     await redis.del(`user_profile:${call.receiver_id}`);
 
-    return { success: true, status: 'rejected', call: updatedCall };
+    const updatedPayload = { ...call, ...updatedCall };
+    await redis.del(`member_incoming_call:${call.receiver_id}`);
+    await redis.setex(`member_call_status:${call.id}`, 3600, JSON.stringify(updatedPayload));
+
+    return { success: true, status: 'rejected', call: updatedPayload };
   }
 }
 
@@ -519,7 +533,12 @@ export async function cancelMemberCall({
   await redis.del(`user_status:${call.caller_id}`);
   await redis.del(`user_status:${call.receiver_id}`);
   await redis.del(`user_profile:${call.caller_id}`);
+  await redis.del(`user_profile:${call.caller_id}`);
   await redis.del(`user_profile:${call.receiver_id}`);
+
+  const updatedPayload = { ...call, status: 'cancelled', ended_at: now, updated_at: now };
+  await redis.del(`member_incoming_call:${call.receiver_id}`);
+  await redis.setex(`member_call_status:${call.id}`, 3600, JSON.stringify(updatedPayload));
 
   return { success: true };
 }
@@ -629,6 +648,9 @@ export async function endMemberCall({
   await redis.del(`user_status:${call.receiver_id}`);
   await redis.del(`user_profile:${call.caller_id}`);
   await redis.del(`user_profile:${call.receiver_id}`);
+
+  await redis.del(`member_incoming_call:${call.receiver_id}`);
+  await redis.setex(`member_call_status:${call.id}`, 3600, JSON.stringify({ ...call, ...updatedCall }));
 
   return {
     success: true,
@@ -764,8 +786,13 @@ export async function submitMemberCallRating({
 
 /**
  * Checks if a member has an active incoming call.
+ * Uses Redis first for zero-DB-cost polling.
  */
 export async function getActiveIncomingCallForMember(memberId: string) {
+  const canonicalId = await resolveCanonicalUserId(getDb(), memberId) || memberId;
+  const cachedCall = await redis.get(`member_incoming_call:${canonicalId}`);
+  if (cachedCall) return JSON.parse(cachedCall);
+
   const db = getDb();
   const sixtySecondsAgo = new Date(Date.now() - 60 * 1000).toISOString();
 
@@ -775,7 +802,7 @@ export async function getActiveIncomingCallForMember(memberId: string) {
       *,
       caller:users!caller_id(id, anonymous_alias, avatar_url, gender, date_of_birth)
     `)
-    .eq('receiver_id', memberId)
+    .eq('receiver_id', canonicalId)
     .eq('status', 'ringing')
     .gte('created_at', sixtySecondsAgo)
     .order('created_at', { ascending: false })
@@ -789,4 +816,26 @@ export async function getActiveIncomingCallForMember(memberId: string) {
     callerAge: calculateAge(call.caller?.date_of_birth),
     callerGender: formatGender(call.caller?.gender),
   };
+}
+
+/**
+ * Gets the current status of a specific call.
+ * Uses Redis first for zero-DB-cost polling.
+ */
+export async function getMemberCallStatus(callId: string) {
+  const cachedCall = await redis.get(`member_call_status:${callId}`);
+  if (cachedCall) return JSON.parse(cachedCall);
+
+  const db = getDb();
+  const { data: call } = await db
+    .from('member_to_member_calls')
+    .select('*')
+    .eq('id', callId)
+    .maybeSingle();
+    
+  if (call) {
+    // Cache it to avoid further hits if repeatedly polled
+    await redis.setex(`member_call_status:${callId}`, 60, JSON.stringify(call));
+  }
+  return call;
 }
