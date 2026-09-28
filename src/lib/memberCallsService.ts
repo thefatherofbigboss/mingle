@@ -122,7 +122,7 @@ export async function getOnlineMembers(currentUserId?: string | null) {
   // First, clean up expired users
   await redis.zremrangebyscore('online_members', '-inf', cutoff);
   // Then get everyone who is still active
-  const onlineUserIds = await redis.zrange('online_members', cutoff, '+inf');
+  const onlineUserIds = await redis.zrangebyscore('online_members', cutoff, '+inf');
 
   if (onlineUserIds.length === 0) return [];
 
