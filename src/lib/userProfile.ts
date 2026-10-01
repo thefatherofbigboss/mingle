@@ -14,6 +14,10 @@ export interface UserRecord {
     phone?: string | null;
     role?: 'member' | 'admin' | 'guest';
     avatar_url?: string | null;
+    anonymous_alias?: string | null;
+    gender?: string | null;
+    date_of_birth?: string | null;
+    bio?: string | null;
     credits?: number | null;
     created_at?: string;
     updated_at?: string;
@@ -38,7 +42,9 @@ export async function syncFirebaseUser(firebaseUser: {
     provider?: string; // 'google.com', 'phone', 'password', etc.
 } | any): Promise<UserRecord | null> {
     const supabase = createAdminClient();
-    const { mappedUserId, uid, email, displayName, phoneNumber } = firebaseUser;
+    const uid = firebaseUser.uid;
+    const mappedUserId = firebaseUser.mappedUserId || (uid ? uuidv5(uid, SM_UUID_NAMESPACE) : null);
+    const { email, displayName, phoneNumber } = firebaseUser;
 
     // 1. Check by ID (Canonical)
     const { data: userById } = await supabase
@@ -148,22 +154,58 @@ export async function syncFirebaseUser(firebaseUser: {
 
     // 3. Fallback: Create new record for the user
     console.log(`[UserService] Provisioning new user record for ${uid} -> ${mappedUserId}`);
-    const { data: newUser, error: insertError } = await supabase
-        .from('users')
-        .insert({
-            id: mappedUserId,
-            username: displayName || email?.split('@')[0] || `user_${uid.slice(0, 5)}`,
-            email: email || null,
-            phone: phoneNumber || null,
-            role: 'member',
-            updated_at: new Date().toISOString()
-        })
-        .select()
-        .single();
+    let newUser: UserRecord | null = null;
+    const baseUsername = displayName || email?.split('@')[0] || `user_${uid.slice(0, 5)}`;
+    
+    for (let attempt = 0; attempt < 5; attempt++) {
+        const candidateUsername = attempt === 0 ? baseUsername : `${baseUsername}_${Math.floor(1000 + Math.random() * 9000)}`;
+        const { data, error: insertError } = await supabase
+            .from('users')
+            .insert({
+                id: mappedUserId,
+                username: candidateUsername,
+                email: email || null,
+                phone: phoneNumber || null,
+                role: 'member',
+                updated_at: new Date().toISOString()
+            })
+            .select()
+            .single();
 
-    if (insertError) {
+        if (!insertError && data) {
+            newUser = data;
+            break;
+        }
+
+        if (insertError?.code === '23505') {
+            // Check if user already exists by ID
+            const { data: existingById } = await supabase.from('users').select('*').eq('id', mappedUserId).maybeSingle();
+            if (existingById) {
+                newUser = existingById;
+                break;
+            }
+            // Check if user already exists by email
+            if (email) {
+                const { data: existingByEmail } = await supabase.from('users').select('*').eq('email', email).maybeSingle();
+                if (existingByEmail) {
+                    newUser = existingByEmail;
+                    break;
+                }
+            }
+            continue; // Retry next attempt with a new username suffix
+        }
+
         console.error('[UserService] Error creating user record:', insertError);
-        return null;
+        break;
+    }
+
+    if (!newUser) {
+        const { data: existing } = await supabase.from('users').select('*').eq('id', mappedUserId).maybeSingle();
+        if (existing) {
+            newUser = existing;
+        } else {
+            return null;
+        }
     }
 
     await linkSubscriptionToUser(mappedUserId, email || '', phoneNumber || '');
@@ -322,7 +364,25 @@ export async function getUserProfileByUserId(userId: string): Promise<UserRecord
         console.error('[UserService] Error fetching profile:', error);
         return null;
     }
-    return data;
+    if (data) return data;
+
+    // Fallback: check if userId is a provider UID linked in user_oauth_accounts
+    const { data: oauthAccount } = await supabase
+        .from('user_oauth_accounts')
+        .select('user_id')
+        .eq('provider_uid', userId)
+        .maybeSingle();
+
+    if (oauthAccount?.user_id) {
+        const { data: userByOauth } = await supabase
+            .from('users')
+            .select('*')
+            .eq('id', oauthAccount.user_id)
+            .maybeSingle();
+        if (userByOauth) return userByOauth;
+    }
+
+    return null;
 }
 
 export async function updateUserProfile(userId: string, data: {
@@ -337,21 +397,59 @@ export async function updateUserProfile(userId: string, data: {
 }): Promise<UserRecord | null> {
     const supabase = createAdminClient();
     
+    // Sanitize inputs for database compatibility
+    const sanitizedData: any = {
+        ...data,
+        updated_at: new Date().toISOString()
+    };
+    if (data.date_of_birth !== undefined) {
+        sanitizedData.date_of_birth = data.date_of_birth && String(data.date_of_birth).trim() !== ''
+            ? String(data.date_of_birth).trim().split('T')[0]
+            : null;
+    }
+    if (data.gender !== undefined) {
+        sanitizedData.gender = data.gender && String(data.gender).trim() !== '' ? data.gender : null;
+    }
+    if (data.bio !== undefined) {
+        sanitizedData.bio = data.bio && String(data.bio).trim() !== '' ? data.bio : null;
+    }
+    if (data.phone !== undefined) {
+        sanitizedData.phone = data.phone && String(data.phone).trim() !== '' ? data.phone : null;
+    }
+
     const { data: updatedUser, error } = await supabase
         .from('users')
-        .update({
-            ...data,
-            updated_at: new Date().toISOString()
-        })
+        .update(sanitizedData)
         .eq('id', userId)
         .select()
-        .single();
+        .maybeSingle();
 
     if (error) {
         console.error('[UserService] Error updating profile:', error);
         return null;
     }
-    return updatedUser;
+
+    if (updatedUser) {
+        return updatedUser;
+    }
+
+    // Self-healing: if no user row with id = userId, check if user exists by email and update that row
+    if (data.email) {
+        const { data: userByEmail } = await supabase
+            .from('users')
+            .update(sanitizedData)
+            .eq('email', data.email.toLowerCase())
+            .select()
+            .maybeSingle();
+
+        if (userByEmail) {
+            console.log(`[UserService] Self-healed profile update by email: ${data.email}`);
+            return userByEmail;
+        }
+    }
+
+    console.warn(`[UserService] User record ${userId} not found to update`);
+    return null;
 }
 
 

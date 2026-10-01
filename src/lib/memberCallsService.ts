@@ -33,8 +33,9 @@ export function calculateAge(dobString: string | null | undefined): string {
  */
 export function formatGender(genderString: string | null | undefined): string {
   if (!genderString || !genderString.trim()) return 'Not specified';
-  const clean = genderString.trim();
-  return clean.charAt(0).toUpperCase() + clean.slice(1).toLowerCase();
+  const clean = genderString.trim().toLowerCase();
+  if (clean === 'prefer_not_to_say') return 'Prefer not to say';
+  return clean.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
 }
 
 async function resolveCanonicalUserId(db: any, identifier?: string | null): Promise<string | null> {

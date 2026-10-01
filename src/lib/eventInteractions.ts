@@ -148,7 +148,7 @@ export async function getEventDiscussions(eventId: string) {
         .from('event_discussions')
         .select(`
             *,
-            user:users!event_discussions_user_id_fkey(username, avatar_url)
+            user:users!event_discussions_user_id_fkey(username, anonymous_alias, avatar_url)
         `)
         .eq('event_id', eventId)
         .is('is_deleted', false)
@@ -156,7 +156,14 @@ export async function getEventDiscussions(eventId: string) {
         .order('created_at', { ascending: true });
         
     if (error) throw error;
-    return data;
+    return (data || []).map((d: any) => ({
+        ...d,
+        user: d.user ? {
+            ...d.user,
+            username: d.user.anonymous_alias || 'Stranger Member',
+            anonymous_alias: d.user.anonymous_alias || 'Stranger Member'
+        } : null
+    }));
 }
 
 export async function postEventDiscussion(userId: string, eventId: string, parentId: string | null, message: string) {

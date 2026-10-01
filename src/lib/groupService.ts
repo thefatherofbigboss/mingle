@@ -182,6 +182,11 @@ export async function getGroups(userId: string | null) {
 
         const enrichedGroups = data.map((g: any) => ({
             ...g,
+            owner: g.owner ? {
+                ...g.owner,
+                username: g.owner.anonymous_alias || 'Stranger Member',
+                anonymous_alias: g.owner.anonymous_alias || 'Stranger Member'
+            } : null,
             is_owner: cleanUserId ? g.owner_id === cleanUserId : false,
             is_joined: joinedGroupIds.has(g.id)
         }));
@@ -224,13 +229,20 @@ export async function getGroup(userId: string | null, groupId: string) {
             isJoined = !!count;
         }
 
+        const sanitizedGroup = data ? {
+            ...data,
+            owner: data.owner ? {
+                ...data.owner,
+                username: data.owner.anonymous_alias || 'Stranger Member',
+                anonymous_alias: data.owner.anonymous_alias || 'Stranger Member'
+            } : null,
+            is_owner: cleanUserId ? data.owner_id === cleanUserId : false,
+            is_joined: isJoined
+        } : null;
+
         return { 
             success: true, 
-            group: {
-                ...data,
-                is_owner: cleanUserId ? data.owner_id === cleanUserId : false,
-                is_joined: isJoined
-            }
+            group: sanitizedGroup
         };
     } catch (error: any) {
         console.error('[GroupService] Error fetching group:', error);
@@ -261,13 +273,22 @@ export async function getUserGroups(userId: string) {
 
         if (error) throw error;
 
+        const sanitizeGroup = (g: any) => ({
+            ...g,
+            owner: g?.owner ? {
+                ...g.owner,
+                username: g.owner.anonymous_alias || 'Stranger Member',
+                anonymous_alias: g.owner.anonymous_alias || 'Stranger Member'
+            } : null
+        });
+
         const owned = memberships.filter(m => m.role === 'owner').map(m => ({
-            ...m.group,
+            ...sanitizeGroup(m.group),
             is_owner: true,
             is_joined: true
         }));
         const joined = memberships.filter(m => m.role !== 'owner').map(m => ({
-            ...m.group,
+            ...sanitizeGroup(m.group),
             is_owner: false,
             is_joined: true
         }));

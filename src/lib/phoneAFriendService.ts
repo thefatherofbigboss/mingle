@@ -35,7 +35,6 @@ async function ensureCallerUserExists(db: any, userId: string) {
       id: userId,
       username: `caller_${shortId}`,
       email: `caller_${shortId}@caller.strangermingle.internal`,
-      anonymous_alias: `Caller_${shortId.toUpperCase()}`,
       role: 'member',
       is_active: true,
       is_verified: false,
@@ -44,6 +43,21 @@ async function ensureCallerUserExists(db: any, userId: string) {
       console.error('[PhoneAFriendService] Error auto-creating caller user:', error);
     }
   }
+}
+
+/**
+ * Anonymizes the caller user record so real names, emails, or usernames are never leaked.
+ */
+function sanitizeCallUser(call: any) {
+  if (!call) return call;
+  if (call.user) {
+    call.user = {
+      ...call.user,
+      username: call.user.anonymous_alias || 'Anonymous Caller',
+      anonymous_alias: call.user.anonymous_alias || 'Anonymous Caller',
+    };
+  }
+  return call;
 }
 
 /**
@@ -626,7 +640,7 @@ export async function initiateCall({
   });
 
   return {
-    call,
+    call: sanitizeCallUser(call),
     agora: {
       appId: getAgoraAppId(),
       channelName: agoraChannelName,
@@ -714,7 +728,7 @@ export async function respondToCall({
 
   return {
     success: true,
-    call: updatedCall,
+    call: sanitizeCallUser(updatedCall),
     agora: {
       appId: getAgoraAppId(),
       channelName: call.agora_channel_name,
@@ -765,7 +779,7 @@ export async function getCallSessionToken({
   });
 
   return {
-    call,
+    call: sanitizeCallUser(call),
     isUser,
     isHost,
     agora: {
@@ -949,7 +963,7 @@ export async function getActiveIncomingCallForHost(hostId: string) {
     .limit(1);
 
   if (error || !calls || calls.length === 0) return null;
-  return calls[0];
+  return sanitizeCallUser(calls[0]);
 }
 
 /**
