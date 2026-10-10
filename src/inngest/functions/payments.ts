@@ -93,6 +93,36 @@ export const processBookingPayment = inngest.createFunction(
             });
         });
 
+        // 5. Send WhatsApp confirmation
+        await step.run('send-whatsapp-confirmation', async () => {
+            // Assume booking has an attendee_phone column, skip if missing
+            if (!booking.attendee_phone) return;
+
+            const { sendTicketConfirmationWhatsApp } = await import('@/lib/whatsapp');
+            
+            const eventDateObj = new Date(eventData.start_datetime);
+            const dateStr = eventDateObj.toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata', day: 'numeric', month: 'long', year: 'numeric' });
+            const timeStr = eventDateObj.toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: true });
+            
+            // Clean phone number (ensure country code is present, assuming India +91 if length is 10)
+            let phone = booking.attendee_phone.replace(/\D/g, '');
+            if (phone.length === 10) phone = `91${phone}`;
+
+            await sendTicketConfirmationWhatsApp({
+                phoneNumber: phone,
+                pdfBuffer: Buffer.from(pdfBase64, 'base64'),
+                userName: booking.attendee_name,
+                eventName: eventData.title,
+                date: dateStr,
+                time: timeStr,
+                venue: eventData.location?.venue_name || eventData.location?.city || 'Selected Venue',
+                mapLink: eventData.location?.google_maps_link || 'N/A',
+                eventLink: `https://www.strangermingle.com/event/${eventData.slug || eventData.id}`,
+                bookingId: booking.booking_ref,
+                paymentId: booking.razorpay_payment_id || 'N/A'
+            });
+        });
+
         return { success: true, bookingId };
     }
 );
