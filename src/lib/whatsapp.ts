@@ -68,7 +68,7 @@ export async function sendTicketConfirmationWhatsApp(params: WhatsAppTicketParam
     template: {
       name: 'ticket_confirmation',
       language: {
-        code: 'en_US',
+        code: 'en',
       },
       components: [
         {
