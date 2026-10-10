@@ -116,7 +116,7 @@ export const processBookingPayment = inngest.createFunction(
                 date: dateStr,
                 time: timeStr,
                 venue: eventData.location?.venue_name || eventData.location?.city || 'Selected Venue',
-                mapLink: eventData.location?.google_maps_link || 'N/A',
+                mapLink: eventData.location?.google_maps_url || 'N/A',
                 eventLink: `https://www.strangermingle.com/event/${eventData.slug || eventData.id}`,
                 bookingId: booking.booking_ref,
                 paymentId: booking.razorpay_payment_id || 'N/A'
