@@ -120,3 +120,46 @@ export async function sendTicketConfirmationWhatsApp(params: WhatsAppTicketParam
   console.log('Successfully sent WhatsApp ticket confirmation!', data);
   return data;
 }
+
+export async function sendWhatsAppTextMessage(to: string, text: string) {
+  const WHATSAPP_TOKEN = process.env.META_SYSTEM_USER_TOKEN;
+  const PHONE_NUMBER_ID = process.env.META_PHONE_NUMBER_ID;
+
+  if (!WHATSAPP_TOKEN || !PHONE_NUMBER_ID) {
+    throw new Error('WhatsApp configuration missing in environment variables.');
+  }
+
+  const cleanPhone = to.replace(/\D/g, '');
+  const endpoint = `https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`;
+
+  const payload = {
+    messaging_product: 'whatsapp',
+    recipient_type: 'individual',
+    to: cleanPhone,
+    type: 'text',
+    text: {
+      preview_url: false,
+      body: text,
+    },
+  };
+
+  const response = await fetch(endpoint, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${WHATSAPP_TOKEN}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  });
+
+  const data = await response.json();
+
+  if (!response.ok) {
+    console.error('WhatsApp API Error:', data);
+    const errMsg = data?.error?.message || JSON.stringify(data);
+    throw new Error(`Failed to send WhatsApp message: ${errMsg}`);
+  }
+
+  console.log('Successfully sent WhatsApp text message!', data);
+  return data;
+}
