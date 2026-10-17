@@ -52,7 +52,16 @@ export async function sendInstagramPrivateReply({
     throw new Error('Meta/Instagram access token not configured in environment variables.');
   }
 
-  const endpoint = `https://graph.facebook.com/v21.0/${instagramAccountId}/messages`;
+  // Instagram User Access Tokens (IGAA...) work on graph.instagram.com/me/messages
+  // Facebook System/Page Access Tokens (EAAP...) work on graph.facebook.com/{id}/messages
+  const isInstagramToken = token.startsWith('IG');
+  const primaryEndpoint = isInstagramToken
+    ? 'https://graph.instagram.com/v21.0/me/messages'
+    : `https://graph.facebook.com/v21.0/${instagramAccountId}/messages`;
+
+  const fallbackEndpoint = isInstagramToken
+    ? `https://graph.facebook.com/v21.0/${instagramAccountId}/messages`
+    : 'https://graph.instagram.com/v21.0/me/messages';
 
   // Standard Instagram Private Reply payload targeting comment_id
   const payload: any = {
@@ -62,7 +71,7 @@ export async function sendInstagramPrivateReply({
     },
   };
 
-  const response = await fetch(endpoint, {
+  let response = await fetch(primaryEndpoint, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${token}`,
@@ -71,10 +80,27 @@ export async function sendInstagramPrivateReply({
     body: JSON.stringify(payload),
   });
 
-  const data = await response.json();
+  let data = await response.json();
 
   if (!response.ok) {
-    console.error('[Instagram Graph API] Error sending private reply:', data);
+    console.warn(`[Instagram Graph API] Primary endpoint failed (${primaryEndpoint}), trying fallback:`, data);
+    try {
+      const fallbackRes = await fetch(fallbackEndpoint, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(payload),
+      });
+      const fallbackData = await fallbackRes.json();
+      if (fallbackRes.ok) {
+        return fallbackData;
+      }
+    } catch (fbErr) {
+      console.error('[Instagram Graph API] Fallback endpoint exception:', fbErr);
+    }
+
     const errMsg = data?.error?.message || JSON.stringify(data);
     throw new Error(`Failed to send Instagram DM: ${errMsg}`);
   }
@@ -95,9 +121,16 @@ export async function postInstagramCommentReply({
     throw new Error('Meta/Instagram access token not configured in environment variables.');
   }
 
-  const endpoint = `https://graph.facebook.com/v21.0/${commentId}/replies`;
+  const isInstagramToken = token.startsWith('IG');
+  const primaryEndpoint = isInstagramToken
+    ? `https://graph.instagram.com/v21.0/${commentId}/replies`
+    : `https://graph.facebook.com/v21.0/${commentId}/replies`;
 
-  const response = await fetch(endpoint, {
+  const fallbackEndpoint = isInstagramToken
+    ? `https://graph.facebook.com/v21.0/${commentId}/replies`
+    : `https://graph.instagram.com/v21.0/${commentId}/replies`;
+
+  let response = await fetch(primaryEndpoint, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${token}`,
@@ -108,9 +141,22 @@ export async function postInstagramCommentReply({
     }),
   });
 
-  const data = await response.json();
+  let data = await response.json();
 
   if (!response.ok) {
+    try {
+      const fbRes = await fetch(fallbackEndpoint, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ message }),
+      });
+      const fbData = await fbRes.json();
+      if (fbRes.ok) return fbData;
+    } catch {}
+
     console.error('[Instagram Graph API] Error posting comment reply:', data);
     const errMsg = data?.error?.message || JSON.stringify(data);
     throw new Error(`Failed to post public reply on Instagram: ${errMsg}`);
@@ -188,22 +234,36 @@ export async function processIncomingInstagramComment(payload: InstagramCommentP
 
   console.log(`[Instagram Webhook] Matched rule "${matchedRule.name}" for comment "${payload.text}" from @${payload.from?.username}`);
 
-  // 3. Format dynamic message variables
+  // 3. Format dynamic message variables & manual link button
   const username = payload.from?.username || 'friend';
-  const siteUrl = process.env.NEXT_PUBLIC_APP_URL || 'https://strangermingle.in';
-  const eventLink = `${siteUrl}/events`;
+  const siteUrl = process.env.NEXT_PUBLIC_APP_URL || 'https://www.strangermingle.com';
+  const targetLink = matchedRule.button_url?.trim() || `${siteUrl}/events`;
+  const buttonTitle = matchedRule.button_text?.trim() || 'Book Tickets';
 
-  const formattedDm = matchedRule.dm_message
+  let formattedDm = matchedRule.dm_message
     .replace(/\{\{username\}\}/gi, `@${username}`)
     .replace(/\{\{name\}\}/gi, username)
-    .replace(/\{\{event_link\}\}/gi, eventLink)
+    .replace(/\{\{event_link\}\}/gi, targetLink)
+    .replace(/\{\{button_url\}\}/gi, targetLink)
+    .replace(/\{\{button_link\}\}/gi, targetLink)
+    .replace(/\{\{link\}\}/gi, targetLink)
     .replace(/\{\{site_url\}\}/gi, siteUrl);
+
+  // If a manual link is configured on the rule and not already placed in the message, append as a high-visibility button link
+  if (matchedRule.button_url?.trim() && !formattedDm.includes(matchedRule.button_url.trim())) {
+    const linkLabel = matchedRule.button_text?.trim()
+      ? `🎟️ ${matchedRule.button_text.trim()}`
+      : '👉 Click here to book';
+    formattedDm = `${formattedDm}\n\n${linkLabel}:\n${matchedRule.button_url.trim()}`;
+  }
 
   const formattedPublicReply = matchedRule.public_reply
     ? matchedRule.public_reply
         .replace(/\{\{username\}\}/gi, `@${username}`)
         .replace(/\{\{name\}\}/gi, username)
-        .replace(/\{\{event_link\}\}/gi, eventLink)
+        .replace(/\{\{event_link\}\}/gi, targetLink)
+        .replace(/\{\{button_url\}\}/gi, targetLink)
+        .replace(/\{\{link\}\}/gi, targetLink)
     : null;
 
   let dmSuccess = false;
